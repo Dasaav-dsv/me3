@@ -86,8 +86,8 @@ fn run() -> LauncherResult<()> {
         info!("Loading profiles from {:?}", args.profiles);
     }
 
-    let all_natives = vec![];
-    let all_packages = vec![];
+    let mut all_natives = vec![];
+    let mut all_packages = vec![];
 
     for profile_path in args.profiles {
         let base = profile_path
@@ -98,13 +98,13 @@ fn run() -> LauncherResult<()> {
         let profile = ModProfile::from_file(&profile_path)?;
         // TODO: check profile.supports
 
-        let mut packages = profile.packages();
-        let mut natives = profile.natives();
+        all_packages = profile.packages();
+        all_natives = profile.natives();
 
-        packages
+        all_packages
             .iter_mut()
             .for_each(|pkg| pkg.source_mut().make_absolute(&base));
-        natives
+        all_natives
             .iter_mut()
             .for_each(|pkg| pkg.source_mut().make_absolute(&base));
     }
