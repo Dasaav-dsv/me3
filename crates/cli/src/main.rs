@@ -306,7 +306,12 @@ fn main() {
             .map(|dirs| dirs.config_local_dir().join("profiles"));
     }
 
-    let _guard = me3_telemetry::install(config.crash_reporting, BoxMakeWriter::new(stderr), None);
+    let _guard = me3_telemetry::install(
+        config.crash_reporting,
+        None,
+        Some(BoxMakeWriter::new(stderr)),
+    );
+
     let bins_path = bins_dir(&config);
 
     let result = match cli.command {
