@@ -7,6 +7,7 @@ use config::{ConfigError, Environment, File, Map, Source};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 mod commands;
 pub mod output;
@@ -305,7 +306,12 @@ fn main() {
             .map(|dirs| dirs.config_local_dir().join("profiles"));
     }
 
-    let _guard = me3_telemetry::install(config.crash_reporting, stderr);
+    let _guard = me3_telemetry::install(
+        config.crash_reporting,
+        None,
+        Some(BoxMakeWriter::new(stderr)),
+    );
+
     let bins_path = bins_dir(&config);
 
     let result = match cli.command {
