@@ -6,8 +6,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use eyre::eyre;
+use eyre::{eyre, OptionExt};
 use me3_mod_host_assets::{
+    cs_file::CsFile,
     dl_device::{self, DlDeviceManager, DlFileOperator, VfsMounts},
     ebl::EblFileManager,
     file_step,
@@ -61,12 +62,13 @@ fn hook_file_init(
                     error!("error" = &*eyre!(e), "failed to locate device manager");
 
                     (ctx.trampoline)(p1);
+
                     return;
                 }
             };
 
             if let Err(e) = hook_device_manager(image_base, mapping.clone()) {
-                error!("error" = &*eyre!(e), "failed to hook device manager");
+                error!("error" = &*e, "failed to hook device manager");
 
                 (ctx.trampoline)(p1);
 
@@ -98,6 +100,13 @@ fn hook_file_init(
                     }
                 }
                 Err(e) => error!("BND4 snapshot error: {e}"),
+            }
+
+            if let Err(e) = hook_process_filecap(image_base, mapping.clone()) {
+                warn!(
+                    "error" = &*e,
+                    "nested archive overrides will not be available"
+                );
             }
         })
         .install()?;
@@ -196,8 +205,11 @@ fn hook_device_manager(
 
             let expanded = DlDeviceManager::lock(device_manager).expand_path(path.as_bytes());
 
-            let (mapped_path, mapped_override) =
-                mapping.get_override(OsString::from_wide(&expanded))?;
+            let lowercased = OsString::from_wide(&expanded)
+                .to_string_lossy()
+                .to_lowercase();
+
+            let (mapped_path, mapped_override) = mapping.get_override(lowercased)?;
 
             info!("override" = mapped_path);
 
@@ -261,7 +273,11 @@ fn hook_set_path(
 
         let expanded = DlDeviceManager::lock(device_manager).expand_path(path.as_bytes());
 
-        let (_, mapped_override) = mapping.get_override(OsString::from_wide(&expanded))?;
+        let lowercased = OsString::from_wide(&expanded)
+            .to_string_lossy()
+            .to_lowercase();
+
+        let (_, mapped_override) = mapping.get_override(lowercased)?;
 
         let mut path = path.clone();
         path.replace(mapped_override);
@@ -283,6 +299,75 @@ fn hook_set_path(
             })
             .install()?;
     }
+
+    Ok(())
+}
+
+#[instrument(name = "filecap", skip_all)]
+fn hook_process_filecap(
+    image_base: *const u8,
+    mapping: Arc<ArchiveOverrideMapping>,
+) -> Result<(), eyre::Error> {
+    let device_manager = locate_device_manager(image_base)?;
+
+    let process_filecap = CsFile::process_filecap_fn().ok_or_eyre("process_filecap not found")?;
+
+    debug!(?process_filecap);
+
+    let override_path = {
+        let mapping = mapping.clone();
+
+        let hook_span = info_span!("hook");
+
+        move |path: &DlUtf16String| {
+            let _span_guard = hook_span.enter();
+
+            let path = path.get().ok()?;
+            debug!("asset" = path.to_string());
+
+            let expanded = DlDeviceManager::lock(device_manager).expand_path(path.as_bytes());
+
+            // TODO: explain what's going on or simplify code.
+            let lowercased_with_dcx = {
+                let mut lowercased = OsString::from_wide(&expanded)
+                    .to_string_lossy()
+                    .to_lowercase();
+
+                lowercased.push_str(".dcx");
+
+                lowercased
+            };
+
+            let lowercased = &lowercased_with_dcx[..lowercased_with_dcx.len() - 4];
+
+            let (mapped_path, mapped_override) = mapping
+                .get_override(&lowercased_with_dcx)
+                .and_then(|(p, o)| Some(p).zip(o.get(..o.len() - 5)))
+                .or_else(|| mapping.get_override(lowercased))?;
+
+            info!("override" = mapped_path);
+
+            let mut path = path.clone();
+            path.replace(mapped_override);
+
+            Some(path)
+        }
+    };
+
+    ModHost::get_attached_mut()
+        .hook(process_filecap)
+        .with_closure(move |ctx, p1, path, p3, p4| {
+            if let Some(path_string) = override_path(unsafe { path.as_ref() }) {
+                let path = unsafe { path.as_ref().with_string(path_string.into()) };
+
+                (ctx.trampoline)(p1, NonNull::from(&path), p3, p4)
+            } else {
+                (ctx.trampoline)(p1, path, p3, p4)
+            }
+        })
+        .install()?;
+
+    info!("applied asset override hook");
 
     Ok(())
 }
