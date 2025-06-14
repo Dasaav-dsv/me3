@@ -41,17 +41,24 @@ pub enum DlCharacterSet {
 }
 
 pub type DlUtf8String<A = DlStdAllocator> = DlString<CxxUtf8String<A>, { UTF8 }>;
+pub type TrustedDlUtf8String<A = DlStdAllocator> = TrustedDlString<CxxUtf8String<A>, { UTF8 }>;
 
 pub type DlUtf16String<A = DlStdAllocator> = DlString<CxxUtf16String<A>, { UTF16 }>;
+pub type TrustedDlUtf16String<A = DlStdAllocator> = TrustedDlString<CxxUtf16String<A>, { UTF16 }>;
 pub type DlUtf16HashString<A = DlStdAllocator> = DlHashString<CxxUtf16String<A>, { UTF16 }>;
 
 pub type DlIso8859String<A = DlStdAllocator> = DlString<CxxNarrowString<A>, { ISO_8859 }>;
+pub type TrustedDlIso8859String<A = DlStdAllocator> =
+    TrustedDlString<CxxNarrowString<A>, { ISO_8859 }>;
 
 pub type DlSjisString<A = DlStdAllocator> = DlString<CxxNarrowString<A>, { SJIS }>;
+pub type TrustedDlSjisString<A = DlStdAllocator> = TrustedDlString<CxxNarrowString<A>, { SJIS }>;
 
 pub type DlEucJpString<A = DlStdAllocator> = DlString<CxxNarrowString<A>, { EUC_JP }>;
+pub type TrustedDlEucJpString<A = DlStdAllocator> = TrustedDlString<CxxNarrowString<A>, { EUC_JP }>;
 
 pub type DlUtf32String<A = DlStdAllocator> = DlString<CxxUtf32String<A>, { UTF32 }>;
+pub type TrustedDlUtf32String<A = DlStdAllocator> = TrustedDlString<CxxUtf32String<A>, { UTF32 }>;
 
 #[repr(C)]
 #[derive(Clone)]
@@ -63,10 +70,10 @@ pub struct DlString<T, const E: u8> {
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct DlHashString<T, const E: u8> {
-    _vtable: usize,
+    vtable: usize,
     string: DlString<T, E>,
-    _hash: u32,
-    _is_unhashed: bool,
+    hash: u32,
+    is_unhashed: bool,
 }
 
 #[repr(transparent)]
@@ -114,6 +121,25 @@ impl<T, const E: u8> DlString<T, E> {
         Ok(encoding) => encoding,
         Err(_undefined) => panic!("encoding not defined"),
     };
+}
+
+impl<T, const E: u8> DlHashString<T, E> {
+    /// Create a new DlHashString from self.
+    pub fn with_string(&self, s: DlString<T, E>) -> Self {
+        Self {
+            vtable: self.vtable,
+            string: s,
+            hash: 0,
+            is_unhashed: true,
+        }
+    }
+}
+
+impl<T, const E: u8> TrustedDlString<T, E> {
+    /// Consumes the string and returns the underlying DlString.
+    pub fn into_inner(self) -> DlString<T, E> {
+        self.0
+    }
 }
 
 #[derive(Error, Debug)]
@@ -191,6 +217,12 @@ impl<T, const E: u8> Deref for TrustedDlString<T, E> {
 impl<T, const E: u8> DerefMut for TrustedDlString<T, E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0.inner
+    }
+}
+
+impl<T, const E: u8> From<TrustedDlString<T, E>> for DlString<T, E> {
+    fn from(value: TrustedDlString<T, E>) -> Self {
+        value.into_inner()
     }
 }
 
