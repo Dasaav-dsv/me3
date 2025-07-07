@@ -14,7 +14,10 @@ pub unsafe fn mount_dlc_ebl(image_base: *const u8) -> Result<MountDlcEbl, FindEr
     }
 
     // SAFETY: upheld by caller.
-    let vtable: NonNull<Vtable> = unsafe { find_vmt(image_base, "CS::CSDlcPlatformImp_forSteam")? };
+    let vtable: NonNull<Vtable> = unsafe {
+        find_vmt(image_base, "CS::CSDlcPlatformImp_forSteam")
+            .or_else(|_| find_vmt(image_base, "NS_SPRJ::CSDlcPlatformImp_forSteam"))?
+    };
 
     // SAFETY: pointer returned by `find_vmt` is aligned.
     let mount_dlc_ebl = unsafe { ptr::read(&raw const vtable.as_ref().mount_dlc_ebl) };

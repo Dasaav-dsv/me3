@@ -62,7 +62,7 @@ strum_macros = "0.27"
 tempfile = "3"
 thiserror = "2"
 toml = "0.8"
-tracing = { version = "0.1", features = ["release_max_level_info"] }
+tracing = "0.1"
 tracing-appender = "0.2"
 tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false }

@@ -14,6 +14,7 @@ use me3_launcher_attach_protocol::{AttachConfig, AttachRequest, AttachResult, At
 use me3_mod_host_assets::mapping::ArchiveOverrideMapping;
 use me3_telemetry::TelemetryConfig;
 use tracing::{error, info, Span};
+use windows::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 
 use crate::{debugger::suspend_for_debugger, deferred::defer_until_init, host::ModHost};
 
@@ -27,10 +28,6 @@ mod native;
 
 static INSTANCE: OnceLock<usize> = OnceLock::new();
 static mut TELEMETRY_INSTANCE: OnceLock<me3_telemetry::Telemetry> = OnceLock::new();
-
-/// https://learn.microsoft.com/en-us/windows/win32/dlls/dllmain#parameters
-const DLL_PROCESS_DETACH: u32 = 0;
-const DLL_PROCESS_ATTACH: u32 = 1;
 
 dll_syringe::payload_procedure! {
     fn me_attach(request: AttachRequest) -> AttachResult {
@@ -86,9 +83,8 @@ fn on_attach(request: AttachRequest) -> AttachResult {
     let result = me3_telemetry::with_root_span("host", "attach", move || {
         info!("Beginning host attach");
 
-        let host = ModHost::new();
+        ModHost::attach(game);
 
-        host.attach();
         let mut override_mapping = ArchiveOverrideMapping::new()?;
         override_mapping.scan_directories(packages.iter())?;
         let override_mapping = Arc::new(override_mapping);
@@ -102,16 +98,18 @@ fn on_attach(request: AttachRequest) -> AttachResult {
 
             move || {
                 for native in natives {
-                    let mut host = ModHost::get_attached_mut();
-                    if let Err(e) = host.load_native(&native.path, native.initializer) {
+                    if let Err(e) =
+                        ModHost::get_attached().load_native(&native.path, native.initializer)
+                    {
                         error!(
-                            error = &*e,
-                            "failed to load native mod from {:?}", &native.path
+                            "error" = &*e,
+                            "path" = ?native.path,
+                            "failed to load native mod",
                         )
                     }
                 }
 
-                if let Err(e) = asset_hooks::attach_override(game, override_mapping) {
+                if let Err(e) = asset_hooks::attach_override(override_mapping) {
                     error!(
                         "error" = &*e,
                         "failed to attach asset override hooks; no files will be overridden"

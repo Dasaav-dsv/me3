@@ -588,9 +588,9 @@ dependencies = [
 
 [[package]]
 name = "cxx-stl"
-version = "3.4.0"
+version = "4.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb3ba5d51c332fde0852e7ec374e51d297361cbe0e8007f075765199951c4eb9"
+checksum = "e42cf6d86f92c165eaf2d4afa54382ec9b8d1cdef39f4265bc938cd055198f83"
 dependencies = [
  "cstl-sys",
 ]
@@ -1475,6 +1475,7 @@ dependencies = [
  "color-eyre",
  "crash-handler",
  "dll-syringe",
+ "either",
  "eyre",
  "libloading",
  "me3-env",
@@ -1482,6 +1483,7 @@ dependencies = [
  "me3-mod-host-assets",
  "me3-mod-protocol",
  "me3_telemetry",
+ "regex",
  "retour",
  "seq-macro",
  "serde_json",

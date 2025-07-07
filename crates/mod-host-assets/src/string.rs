@@ -16,8 +16,12 @@ use std::{
 
 use cxx_stl::{
     alloc::CxxProxy,
-    string::{CxxNarrowString, CxxUtf16String, CxxUtf32String, CxxUtf8String},
+    string::{
+        utf16::CxxUtf16StringLayout, CxxNarrowString, CxxUtf16String, CxxUtf32String, CxxUtf8String,
+    },
 };
+#[cfg(windows)]
+use cxx_stl::{alloc::WithCxxProxy, string::utf16::RawUtf16String};
 use thiserror::Error;
 
 use crate::alloc::DlStdAllocator;
@@ -44,6 +48,12 @@ pub type DlUtf8String<A = DlStdAllocator> = DlString<CxxUtf8String<A>, { UTF8 }>
 
 pub type DlUtf16String<A = DlStdAllocator> = DlString<CxxUtf16String<A>, { UTF16 }>;
 pub type DlUtf16HashString<A = DlStdAllocator> = DlHashString<CxxUtf16String<A>, { UTF16 }>;
+
+pub type DlUtf16StringMsvc2012<A = DlStdAllocator> =
+    DlString<cxx_stl::string::msvc2012::CxxUtf16String<A>, { UTF16 }>;
+
+pub type DlUtf16StringLayout<A, L> = DlString<CxxUtf16StringLayout<A, L>, { UTF16 }>;
+pub type DlUtf16HashStringLayout<A, L> = DlHashString<CxxUtf16StringLayout<A, L>, { UTF16 }>;
 
 pub type DlIso8859String<A = DlStdAllocator> = DlString<CxxNarrowString<A>, { ISO_8859 }>;
 
@@ -205,7 +215,10 @@ impl<A: CxxProxy> fmt::Display for TrustedDlString<CxxUtf8String<A>, { UTF8 }> {
 }
 
 #[cfg(windows)]
-impl<A: CxxProxy> fmt::Display for TrustedDlString<CxxUtf16String<A>, { UTF16 }> {
+impl<A: CxxProxy, L> fmt::Display for TrustedDlString<CxxUtf16StringLayout<A, L>, { UTF16 }>
+where
+    L: WithCxxProxy<Value = RawUtf16String, Alloc = A>,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use std::{ffi::OsString, os::windows::ffi::OsStringExt};
 

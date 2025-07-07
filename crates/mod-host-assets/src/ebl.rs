@@ -44,7 +44,7 @@ impl EblFileManager {
                 return Ok(make_ebl_object);
             }
 
-            find_vmt(image_base, "DLEncryptedBinderLightUtility").map(|ptr| {
+            find_vmt(image_base, "DLEBL::DLEncryptedBinderLightUtility").map(|ptr| {
                 let &EblUtilityVtableER {
                     make_ebl_object, ..
                 } = ptr.as_ref();

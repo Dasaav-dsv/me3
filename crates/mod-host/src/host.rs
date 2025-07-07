@@ -1,18 +1,19 @@
 use std::{
+    collections::HashMap,
     ffi::CString,
     fmt::Debug,
-    marker::Tuple,
     panic,
     path::Path,
-    sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
 use closure_ffi::traits::FnPtr;
 use libloading::{Library, Symbol};
-use me3_mod_protocol::{native::NativeInitializerCondition, ModProfile};
+use me3_mod_protocol::{native::NativeInitializerCondition, Game};
 use retour::Function;
 use tracing::{error, info, warn};
+use windows::{core::PCWSTR, Win32::System::LibraryLoader::GetModuleHandleW};
 
 use self::hook::HookInstaller;
 use crate::{
@@ -21,34 +22,64 @@ use crate::{
 };
 
 mod append;
+mod game_properties;
 pub mod hook;
 
-static ATTACHED_INSTANCE: OnceLock<RwLock<ModHost>> = OnceLock::new();
+static ATTACHED_INSTANCE: OnceLock<ModHost> = OnceLock::new();
 
-#[derive(Default)]
 pub struct ModHost {
-    hooks: Vec<Arc<UntypedDetour>>,
-    native_modules: Vec<Library>,
-    profiles: Vec<ModProfile>,
+    game: Game,
+    image_base: usize,
+    hooks: Mutex<Vec<Arc<UntypedDetour>>>,
+    native_modules: Mutex<Vec<Library>>,
+    property_overrides: Mutex<HashMap<Vec<u16>, bool>>,
 }
 
 impl Debug for ModHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModHost")
+            .field("game", &self.game)
             .field("hooks", &self.hooks)
-            .field("profiles", &self.profiles)
             .finish()
     }
 }
 
 #[allow(unused)]
 impl ModHost {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn attach(game: Game) {
+        let image_base = unsafe { GetModuleHandleW(PCWSTR::null()) }
+            .expect("GetModuleHandleW failed")
+            .0 as usize;
+
+        let instance = Self {
+            game,
+            image_base,
+            hooks: Default::default(),
+            native_modules: Default::default(),
+            property_overrides: Default::default(),
+        };
+
+        ATTACHED_INSTANCE.set(instance).expect("already attached");
+
+        if let Err(e) = Self::get_attached().attach_game_property_override() {
+            error!("error" = &*e, "failed to attach game property override");
+        }
+    }
+
+    pub fn get_attached() -> &'static ModHost {
+        ATTACHED_INSTANCE.get().expect("not attached")
+    }
+
+    pub fn game(&self) -> Game {
+        self.game
+    }
+
+    pub fn image_base(&self) -> *const u8 {
+        self.image_base as _
     }
 
     pub fn load_native(
-        &mut self,
+        &self,
         path: &Path,
         condition: Option<NativeInitializerCondition>,
     ) -> eyre::Result<()> {
@@ -92,40 +123,22 @@ impl ModHost {
                 Ok(())
             }
             Ok(result) => result.map(|module| {
-                self.native_modules.push(module);
+                self.native_modules.lock().unwrap().push(module);
             }),
         }
     }
 
-    pub fn get_attached() -> RwLockReadGuard<'static, ModHost> {
-        let lock = ATTACHED_INSTANCE.get().expect("not attached");
-
-        match lock.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    pub fn get_attached_mut() -> RwLockWriteGuard<'static, ModHost> {
-        let lock = ATTACHED_INSTANCE.get().expect("not attached");
-
-        match lock.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    pub fn attach(self) {
-        ATTACHED_INSTANCE
-            .set(RwLock::new(self))
-            .expect("already attached");
-    }
-
-    pub fn hook<F>(&mut self, target: F) -> HookInstaller<'_, F>
+    pub fn hook<F>(&'static self, target: F) -> HookInstaller<F>
     where
         F: Function + FnPtr,
-        F::Arguments: Tuple,
     {
-        HookInstaller::new(Some(&mut self.hooks), target)
+        HookInstaller::new(target).on_install(|hook| self.hooks.lock().unwrap().push(hook))
+    }
+
+    pub fn override_game_property<S: AsRef<str>>(&self, property: S, state: bool) {
+        self.property_overrides
+            .lock()
+            .unwrap()
+            .insert(property.as_ref().encode_utf16().collect(), state);
     }
 }
