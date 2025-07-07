@@ -19,6 +19,7 @@ closure-ffi = { version = "3.0", features = ["coverage", "std", "tuple_trait"] }
 color-eyre.workspace = true
 crash-handler.workspace = true
 dll-syringe = { workspace = true, features = ["payload-utils"] }
+either = "1.15"
 eyre = { workspace = true, default-features = false, features = ["track-caller"] }
 libloading = "0.8.8"
 me3-env.workspace = true
@@ -26,6 +27,7 @@ me3-launcher-attach-protocol.workspace = true
 me3-mod-host-assets.workspace = true
 me3-mod-protocol.workspace = true
 me3-telemetry.workspace = true
+regex.workspace = true
 retour = { git = "https://github.com/Hpmason/retour-rs" }
 seq-macro = "0.3.6"
 serde_json.workspace = true

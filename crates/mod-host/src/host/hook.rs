@@ -17,29 +17,40 @@ pub enum HookSource<F: Function> {
     Closure((F, &'static OnceCell<F>)),
 }
 
-pub struct HookInstaller<'a, F>
+pub struct HookInstaller<F>
 where
     F: Function,
 {
     enable_on_install: bool,
+    on_install: Option<Box<dyn FnOnce(Arc<UntypedDetour>)>>,
     source: Option<HookSource<F>>,
-    storage: Option<&'a mut Vec<Arc<UntypedDetour>>>,
     span: Span,
     target: F,
 }
 
-impl<'a, F> HookInstaller<'a, F>
+impl<F> HookInstaller<F>
 where
     F: Function,
 {
     #[inline]
-    pub fn new(storage: Option<&'a mut Vec<Arc<UntypedDetour>>>, target: F) -> Self {
+    pub fn new(target: F) -> Self {
         Self {
             enable_on_install: true,
+            on_install: None,
             source: None,
-            storage,
             span: Span::none(),
             target,
+        }
+    }
+
+    #[inline]
+    pub fn on_install<C>(self, c: C) -> Self
+    where
+        C: FnOnce(Arc<UntypedDetour>) + 'static,
+    {
+        Self {
+            on_install: Some(Box::new(c)),
+            ..self
         }
     }
 
@@ -93,8 +104,8 @@ where
 
         let detour = Arc::new(install_detour(self.target, hook)?);
 
-        if let Some(storage) = self.storage {
-            storage.push(unsafe { mem::transmute(detour.clone()) });
+        if let Some(on_install) = self.on_install {
+            on_install(unsafe { mem::transmute(detour.clone()) })
         }
 
         if let Some(trampoline) = uninit_trampoline {
@@ -121,7 +132,7 @@ mod tests {
 
     #[test]
     fn context_with_closure() -> Result<(), Box<dyn Error>> {
-        let hook_installer = HookInstaller::<unsafe extern "C" fn() -> usize>::new(None, test_fn);
+        let hook_installer = HookInstaller::<unsafe extern "C" fn() -> usize>::new(test_fn);
 
         let hook = hook_installer
             .with_closure(|trampoline| 5 + unsafe { trampoline() })

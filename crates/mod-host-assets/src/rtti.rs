@@ -115,7 +115,7 @@ unsafe fn find_type_name(
     let name_bytes = type_name.as_bytes().iter().cloned().fuse();
     let mut next_name_byte = name_bytes.clone();
 
-    let ptr = (*desc).name.as_ptr();
+    let ptr = unsafe { (*desc).name.as_ptr() };
     let mut len = usize::wrapping_neg(1);
 
     loop {

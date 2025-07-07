@@ -6,367 +6,440 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+use either::Either;
 use eyre::eyre;
 use me3_mod_host_assets::{
-    dl_device::{self, DlDeviceManager, DlFileOperator, VfsMounts},
+    dl_device::{
+        self, DlDeviceManager, DlDeviceManagerLayout, DlDeviceManagerMsvc2012, VfsMountsLayout,
+    },
     dlc::mount_dlc_ebl,
     ebl::EblFileManager,
     file_step,
     mapping::ArchiveOverrideMapping,
-    string::DlUtf16String,
+    string::DlUtf16StringLayout,
     wwise::{self, find_wwise_open_file, AkOpenMode},
 };
 use me3_mod_protocol::Game;
 use tracing::{debug, error, info, info_span, instrument, warn};
-use windows::{core::PCWSTR, Win32::System::LibraryLoader::GetModuleHandleW};
+use windows::core::PCWSTR;
 
 use crate::host::ModHost;
 
-static VFS: Mutex<VfsMounts> = Mutex::new(VfsMounts::new());
-
 #[instrument(name = "assets", skip_all)]
-pub fn attach_override(
-    _game: Game,
-    mapping: Arc<ArchiveOverrideMapping>,
-) -> Result<(), eyre::Error> {
-    let image_base = image_base();
-
-    hook_file_init(image_base, mapping.clone())?;
-
-    if let Err(e) = try_hook_wwise(image_base, mapping.clone()) {
-        debug!("error" = &*e, "skipping Wwise hook");
-    }
-
-    if let Err(e) = try_hook_dlc(image_base) {
-        debug!("error" = &*e, "skipping DLC hook");
-    }
-
-    Ok(())
+pub fn attach_override(mapping: Arc<ArchiveOverrideMapping>) -> Result<(), eyre::Error> {
+    let attach_context = AttachContext::new(mapping);
+    Arc::new(attach_context).attach()
 }
 
-#[instrument(name = "file_step", skip_all)]
-fn hook_file_init(
-    image_base: *const u8,
-    mapping: Arc<ArchiveOverrideMapping>,
-) -> Result<(), eyre::Error> {
-    let init_fn = unsafe { file_step::find_init_fn(image_base)? };
+impl AttachContext {
+    fn new(mapping: Arc<ArchiveOverrideMapping>) -> Self {
+        let host = ModHost::get_attached();
+
+        Self {
+            game: host.game(),
+            image_base: host.image_base(),
+            mapping,
+            device_manager: OnceLock::new(),
+        }
+    }
+
+    fn attach(self: Arc<Self>) -> Result<(), eyre::Error> {
+        self.enable_loose_params();
+
+        self.clone().hook_file_device()?;
+
+        if let Err(e) = self.clone().try_hook_wwise() {
+            warn!("error" = &*e, "skipping Wwise hook");
+        }
+
+        Ok(())
+    }
+
+    // Hook lifecycle for asset overrides
+    //
+    // 1. `FileStep::STEP_Init` This is where the game's file loading pipeline is set up, with
+    //    prerequisites already initialized (like DlDeviceManager, which we need). The first hook is
+    //    placed here, which allows for calling the trampoline in the middle of the initialization
+    //    to capture and extract the DVDBNDs after they are mounted.
+    //
+    // 2.1. `DlMicrosoftDiskFileDevice::Open`
+    //     Its address is acquired from DlDeviceManager (see above for initialization guarantees).
+    //     This function handles opening on-disk files, but will also be called with any
+    //     file not present in DVDBND roots. By removing all DVDBNDs (see 1.) all files fall
+    //     through to this point and can be dispatched to actual on-disk file overrides
+    //     or the original files in the archives via `VfsMountsLayout::try_open_file`.
+    //     Returns a `DLFileOperator` for the opened file.
+    //
+    // 2.2. `DLFileOperator::SetPath`
+    //     Acquired from a `DLFileOperator` vtable returned from 2.1. and hooked alongside it,
+    //     otherwise the returned overriden paths will be themselves overriden by the game.
+    //
+    // 3. Encrypted Binder Light Without hooking `make_ebl_object` overriden files will be attempted
+    //    to be decrypted by the game as if loaded from the DVDBNDs. This hook prevents DLEBL
+    //    objects from being created for overriden files.
+    //
+    // 4. `CSDlcPlatformImp_forSteam::Mount` DLC archives like DLC1, DLC2, ... BDTs/BHDs are loaded
+    //    at a later point after a DLC license check. They will not be captured in 1., so this hook
+    //    is needed to manipulate them for overriding files from the DLC DVDBNDs.
+    #[instrument(name = "file_device", skip_all)]
+    fn hook_file_device(self: Arc<Self>) -> Result<(), eyre::Error> {
+        let init_fn = unsafe { file_step::find_init_fn(self.image_base)? };
 
     debug!("FileStep::STEP_Init" = ?init_fn);
+        debug!("FileStep::STEP_Init" = ?init_fn);
 
-    ModHost::get_attached_mut()
-        .hook(init_fn)
-        .with_span(info_span!("hook"))
-        .with_closure(move |p1, trampoline| {
-            let mut device_manager = match locate_device_manager(image_base) {
-                Ok(device_manager) => DlDeviceManager::lock(device_manager),
-                Err(e) => {
-                    error!("error" = &*eyre!(e), "failed to locate device manager");
+        let hook_span = info_span!("hook");
+
+        ModHost::get_attached()
+            .hook(init_fn)
+            .with_closure(move |p1, trampoline| {
+                let _span_guard = hook_span.enter();
+
+                let device_manager = match self.locate_device_manager() {
+                    Ok(device_manager) => device_manager,
+                    Err(e) => {
+                        error!("error" = &*eyre!(e), "failed to locate device manager");
+
+                        unsafe {
+                            trampoline(p1);
+                        }
+
+                        return;
+                    }
+                };
+
+                // Dispatch to one of two container allocator layouts,
+                // which correspond to MSVC2012 (for Dark Souls 3) or later (for other games).
+                either::for_both!(device_manager, device_manager_ptr => {
+                    let mut device_manager = DlDeviceManagerLayout::lock(device_manager_ptr);
+
+                    let open_disk_file = device_manager.open_disk_file();
+
+                    // Closure that fetches file overrides from the `ArchiveOverrideMapping`
+                    // for virtual paths expanded via `DlDeviceManagerGuard::expand_path`.
+                    let override_path = {
+                        let mapping = self.mapping.clone();
+
+                        move |path, enable_logging| {
+                            let path = DlUtf16StringLayout::get(path).ok()?;
+                            let expanded =
+                                DlDeviceManagerLayout::lock(device_manager_ptr).expand_path(path.as_bytes());
+
+                            let expanded = OsString::from_wide(&expanded);
+
+                            if enable_logging {
+                                debug!("asset" = ?expanded);
+                            }
+
+                            let (mapped_path, mapped_override) =
+                                mapping.vfs_override(expanded)?;
+
+                            if enable_logging {
+                                info!("override" = mapped_path);
+                            }
+
+                            let mut path = path.clone();
+                            path.replace(mapped_override);
+
+                            Some(path)
+                        }
+                    };
+
+                    let vfs_mounts = Arc::new(Mutex::new(Default::default()));
+
+                    // 2.1.
+                    let result = ModHost::get_attached()
+                        .hook(open_disk_file)
+                        .with_closure({
+                            let vfs_mounts = vfs_mounts.clone();
+
+                            move |p1, path, p3, p4, p5, p6, trampoline| {
+                                let file_operator = if let Some(path) = override_path(unsafe { path.as_ref() }, true)
+                                {
+                                    unsafe {
+                                        trampoline(
+                                            p1,
+                                            NonNull::from(&path).cast(),
+                                            path.as_ptr(),
+                                            p4,
+                                            p5.clone(),
+                                            p6,
+                                        )
+                                    }
+                                } else {
+                                    unsafe { trampoline(p1, path, p3, p4, p5.clone(), p6) }
+                                };
+
+                                // 2.2.
+                                if let Some(file_operator) = file_operator {
+                                    static HOOK_RESULT: OnceLock<bool> = OnceLock::new();
+
+                                    if *HOOK_RESULT.get_or_init(|| {
+                                        let vtable = unsafe { file_operator.as_ref().as_ref() };
+
+                                        // There are three similar set path function overloads,
+                                        // hooking just the first one is insufficient for some games (e.g. Nightreign).
+                                        for set_path in [vtable.set_path, vtable.set_path2, vtable.set_path3] {
+                                            let override_path = override_path.clone();
+
+                                            let result = ModHost::get_attached()
+                                                .hook(set_path)
+                                                .with_closure(move |p1, path, p3, p4, trampoline| {
+                                                    if let Some(path) = override_path(unsafe { path.as_ref() }, false) {
+                                                        unsafe { trampoline(p1, path.as_ref().into(), p3, p4) }
+                                                    } else {
+                                                        unsafe { trampoline(p1, path, p3, p4) }
+                                                    }
+                                                })
+                                                .install();
+
+                                            if let Err(e) = result {
+                                                error!("error" = %e, "failed to hook DLFileOperator::SetPath: {e}");
+                                                return false;
+                                            }
+                                        }
+
+                                        true
+                                    })
+                                    {
+                                        return Some(file_operator);
+                                    }
+                                }
+
+                                // Open non-overriden file from the game archives.
+                                unsafe { VfsMountsLayout::try_open_file(&*vfs_mounts.lock().unwrap(), path, p3, p4, p5, p6) }
+                            }
+                        })
+                        .install();
+
+                    if let Err(e) = result {
+                        error!("error" = %e, "failed to hook device manager");
+
+                        unsafe {
+                            trampoline(p1);
+                        }
+
+                        return;
+                    } else {
+                        info!("kind" = "device_manager", "applied asset override hook");
+                    }
+
+                    // 1.
+                    let snap = device_manager.snapshot();
 
                     unsafe {
                         trampoline(p1);
                     }
 
-                    return;
-                }
-            };
+                    match snap {
+                        Ok(snap) => {
+                            let new = device_manager.extract_new(snap);
 
-            if let Err(e) = hook_device_manager(image_base, mapping.clone()) {
-                error!("error" = &*eyre!(e), "failed to hook device manager");
+                            debug!("extracted_mounts" = ?new);
 
-                unsafe {
-                    trampoline(p1);
-                }
+                            *vfs_mounts.lock().unwrap() = new;
 
-                return;
-            }
+                            // 3.
+                            let make_ebl_object = unsafe { EblFileManager::make_ebl_object(self.image_base).map_err(|e| eyre!(e)) };
 
-            let snap = device_manager.snapshot();
+                            let result = make_ebl_object.and_then(|make_ebl_object| {
+                                debug!(?make_ebl_object);
 
-            unsafe {
-                trampoline(p1);
-            }
+                                ModHost::get_attached()
+                                    .hook(make_ebl_object)
+                                    .with_closure({
+                                        let mapping = self.mapping.clone();
+                                        let vfs_mounts = vfs_mounts.clone();
 
-            match snap {
-                Ok(snap) => {
-                    let new = device_manager.extract_new(snap);
+                                        move |p1, path, p3, trampoline| {
+                                            let mut device_manager = DlDeviceManagerLayout::lock(device_manager_ptr);
 
-                    debug!("extracted_mounts" = ?new);
+                                            let path_cstr = PCWSTR::from_raw(path);
+                                            let expanded = unsafe { device_manager.expand_path(path_cstr.as_wide()) };
 
-                    let mut vfs = VFS.lock().unwrap();
+                                            if mapping
+                                                .vfs_override(OsString::from_wide(&expanded))
+                                                .is_some()
+                                            {
+                                                return None;
+                                            }
 
-                    *vfs = new;
+                                            let _guard = device_manager.push_vfs(&*vfs_mounts.lock().unwrap());
 
-                    if let Err(e) = hook_ebl_utility(image_base, mapping.clone()) {
-                        error!("error" = &*e, "failed to apply EBL hooks");
+                                            unsafe { (trampoline)(p1, path, p3) }
+                                        }
+                                    })
+                                    .install().map_err(|e| eyre!(e))
+                            });
 
-                        let vfs = mem::take(&mut *vfs);
+                            if let Err(e) = result {
+                                error!("error" = &*e, "failed to apply EBL hooks");
 
-                        let guard = device_manager.push_vfs(&vfs);
+                                let vfs_mounts = mem::take(&mut *vfs_mounts.lock().unwrap());
 
-                        mem::forget(guard);
+                                let guard = device_manager.push_vfs(&vfs_mounts);
+
+                                mem::forget(guard);
+
+                                return;
+                            } else {
+                                info!("kind" = "ebl", "applied asset override hook");
+                            }
+                        }
+                        Err(e) => {
+                            error!("BND4 snapshot error: {e}");
+                            return;
+                        }
                     }
-                }
-                Err(e) => error!("BND4 snapshot error: {e}"),
-            }
-        })
-        .install()?;
 
-    Ok(())
-}
+                    if self.game != Game::DarkSouls3
+                        && self.game != Game::EldenRing
+                        && self.game != Game::Nightreign
+                    {
+                        info!("not a game with DLC, skipping hook");
+                        return;
+                    }
 
-#[instrument(name = "ebl", skip_all)]
-fn hook_ebl_utility(
-    image_base: *const u8,
-    mapping: Arc<ArchiveOverrideMapping>,
-) -> Result<(), eyre::Error> {
-    let device_manager = locate_device_manager(image_base)?;
+                    // 4.
+                    let mount_dlc_ebl = unsafe { mount_dlc_ebl(self.image_base).map_err(|e| eyre!(e)) };
 
-    let make_ebl_object = unsafe { EblFileManager::make_ebl_object(image_base)? };
+                    let result = mount_dlc_ebl.and_then(|mount_dlc_ebl| {
+                        ModHost::get_attached()
+                            .hook(mount_dlc_ebl)
+                            .with_closure(move |p1, p2, p3, p4, trampoline| {
+                                let mut device_manager = DlDeviceManagerLayout::lock(device_manager_ptr);
 
-    debug!(?make_ebl_object);
+                                let snap = device_manager.snapshot();
 
-    let mut mod_host = ModHost::get_attached_mut();
+                                unsafe {
+                                    trampoline(p1, p2, p3, p4);
+                                }
 
-    mod_host
-        .hook(make_ebl_object)
-        .with_closure(move |p1, path, p3, trampoline| {
-            let mut device_manager = DlDeviceManager::lock(device_manager);
+                                match snap {
+                                    Ok(snap) => {
+                                        let new = device_manager.extract_new(snap);
 
-            let path_cstr = PCWSTR::from_raw(path);
-            let expanded = unsafe { device_manager.expand_path(path_cstr.as_wide()) };
+                                        if !new.is_empty() {
+                                            debug!("extracted_mounts" = ?new);
 
-            if mapping
-                .vfs_override(OsString::from_wide(&expanded))
-                .is_some()
-            {
-                return None;
-            }
+                                            vfs_mounts.lock().unwrap().append(new);
+                                        }
+                                    }
+                                    Err(e) => error!("BND4 snapshot error: {e}"),
+                                }
+                            })
+                            .install().map_err(|e| eyre!(e))
+                    });
 
-            let _guard = device_manager.push_vfs(&VFS.lock().unwrap());
+                    if let Err(e) = result {
+                        warn!("error" = &*e, "skipping DLC hook");
+                    } else {
+                        info!("kind" = "dlc", "applied asset override hook");
+                    }
+                })
+            })
+            .install()?;
 
-            unsafe { (trampoline)(p1, path, p3) }
-        })
-        .install()?;
+        Ok(())
+    }
 
-    info!("applied asset override hook");
-
-    Ok(())
-}
-
-#[instrument(name = "device_manager", skip_all)]
-fn hook_device_manager(
-    image_base: *const u8,
-    mapping: Arc<ArchiveOverrideMapping>,
-) -> Result<(), eyre::Error> {
-    let device_manager = locate_device_manager(image_base)?;
-
-    let open_disk_file = DlDeviceManager::lock(device_manager).open_disk_file();
-
-    let override_path = {
-        let mapping = mapping.clone();
-
-        move |path: &DlUtf16String| {
-            let path = path.get().ok()?;
-            let expanded = DlDeviceManager::lock(device_manager).expand_path(path.as_bytes());
-
-            let (mapped_path, mapped_override) =
-                mapping.vfs_override(OsString::from_wide(&expanded))?;
-
-            info!("override" = mapped_path);
-
-            let mut path = path.clone();
-            path.replace(mapped_override);
-
-            Some(path)
+    // Wwise must be hooked separately for games that have it.
+    // The files are loaded through `DLMOW::IOHookBlocking`, which is a Wwise file location
+    // resolver: https://www.audiokinetic.com/en/public-library/2024.1.6_8842/?source=SDK&id=class_a_k_1_1_stream_mgr_1_1_i_ak_file_location_resolver.html
+    #[instrument(name = "wwise", skip_all)]
+    fn try_hook_wwise(self: Arc<Self>) -> Result<(), eyre::Error> {
+        if self.game < Game::EldenRing {
+            info!("not a Wwise game, skipping hook");
+            return Ok(());
         }
-    };
 
-    let hook_set_path = move |file_operator: NonNull<DlFileOperator>| {
-        hook_set_path(image_base, file_operator, mapping.clone())
-            .inspect_err(|e| error!("Failed to hook DLFileOperator::SetPath: {e}"))
-            .is_ok()
-    };
+        let wwise_open_file = unsafe { find_wwise_open_file(self.image_base)? };
 
-    ModHost::get_attached_mut()
-        .hook(open_disk_file)
-        .with_span(info_span!("hook"))
-        .with_closure(move |p1, path, p3, p4, p5, p6, trampoline| {
-            let file_operator = if let Some(path) = override_path(unsafe { path.as_ref() }) {
-                unsafe {
-                    trampoline(
-                        p1,
-                        NonNull::from(&path).cast(),
-                        path.as_ptr(),
-                        p4,
-                        p5.clone(),
-                        p6,
-                    )
-                }
-            } else {
-                unsafe { trampoline(p1, path, p3, p4, p5.clone(), p6) }
-            };
+        let hook_span = info_span!("hook");
 
-            if let Some(file_operator) = file_operator {
-                static HOOK_RESULT: OnceLock<bool> = OnceLock::new();
+        ModHost::get_attached()
+            .hook(wwise_open_file)
+            .with_closure(move |p1, path, open_mode, p4, p5, p6, trampoline| {
+                let _span_guard = hook_span.enter();
 
-                if *HOOK_RESULT.get_or_init(|| hook_set_path(file_operator)) {
-                    return Some(file_operator);
-                }
-            }
+                let path_string = unsafe { PCWSTR::from_raw(path).to_string().unwrap() };
+                debug!("asset" = path_string);
 
-            unsafe { VFS.lock().unwrap().try_open_file(path, p3, p4, p5, p6) }
-        })
-        .install()?;
+                if let Some((mapped_path, mapped_override)) =
+                    wwise::find_override(&self.mapping, &path_string)
+                {
+                    info!("override" = mapped_path);
 
-    info!("applied asset override hook");
-
-    Ok(())
-}
-
-fn hook_set_path(
-    image_base: *const u8,
-    file_operator: NonNull<DlFileOperator>,
-    mapping: Arc<ArchiveOverrideMapping>,
-) -> Result<(), eyre::Error> {
-    let vtable = unsafe { file_operator.as_ref().as_ref() };
-
-    let device_manager = locate_device_manager(image_base)?;
-
-    let override_path = move |path: &DlUtf16String| {
-        let path = path.get().ok()?;
-
-        let expanded = DlDeviceManager::lock(device_manager).expand_path(path.as_bytes());
-
-        let (_, mapped_override) = mapping.vfs_override(OsString::from_wide(&expanded))?;
-
-        let mut path = path.clone();
-        path.replace(mapped_override);
-
-        Some(path)
-    };
-
-    for set_path in [vtable.set_path, vtable.set_path2, vtable.set_path3] {
-        let override_path = override_path.clone();
-
-        ModHost::get_attached_mut()
-            .hook(set_path)
-            .with_closure(move |p1, path, p3, p4, trampoline| {
-                if let Some(path) = override_path(unsafe { path.as_ref() }) {
-                    unsafe { trampoline(p1, path.as_ref().into(), p3, p4) }
+                    unsafe {
+                        trampoline(
+                            p1,
+                            mapped_override.as_ptr(),
+                            AkOpenMode::Read as _,
+                            p4,
+                            p5,
+                            p6,
+                        )
+                    }
                 } else {
-                    unsafe { trampoline(p1, path, p3, p4) }
+                    unsafe { trampoline(p1, path, open_mode, p4, p5, p6) }
                 }
             })
             .install()?;
+
+        info!("kind" = "wwise", "applied asset override hook");
+
+        Ok(())
     }
 
-    Ok(())
+    fn locate_device_manager(&self) -> DeviceManagerResult {
+        self.device_manager
+            .get_or_init(|| unsafe {
+                match self.game {
+                    Game::DarkSouls3 => {
+                        DlDeviceManagerMsvc2012::find_device_manager(self.image_base)
+                            .map(Either::Right)
+                    }
+                    _ => DlDeviceManager::find_device_manager(self.image_base).map(Either::Left),
+                }
+            })
+            .clone()
+    }
+
+    fn enable_loose_params(&self) {
+        // Some Dark Souls 3 mods use a legacy Mod Engine 2 option of loading "loose" param files
+        // instead of Data0. For backwards compatibility me3 enables it below.
+        if self.game != Game::DarkSouls3 {
+            return;
+        }
+
+        const LOOSE_PARAM_FILES: [&str; 3] = [
+            "data1:/param/gameparam/gameparam.parambnd.dcx",
+            "data1:/param/gameparam/gameparam_dlc1.parambnd.dcx",
+            "data1:/param/gameparam/gameparam_dlc2.parambnd.dcx",
+        ];
+
+        if LOOSE_PARAM_FILES
+            .iter()
+            .any(|file| self.mapping.vfs_override(file).is_some())
+        {
+            ModHost::get_attached()
+                .override_game_property("Game.Debug.EnableRegulationFile", false);
+        }
+    }
 }
 
-#[instrument(name = "wwise", skip_all)]
-fn try_hook_wwise(
+type DeviceManagerResult = Result<
+    Either<NonNull<DlDeviceManager>, NonNull<DlDeviceManagerMsvc2012>>,
+    dl_device::FindError,
+>;
+
+struct AttachContext {
+    game: Game,
     image_base: *const u8,
     mapping: Arc<ArchiveOverrideMapping>,
-) -> Result<(), eyre::Error> {
-    let wwise_open_file = unsafe { find_wwise_open_file(image_base)? };
-
-    ModHost::get_attached_mut()
-        .hook(wwise_open_file)
-        .with_span(info_span!("hook"))
-        .with_closure(move |p1, path, open_mode, p4, p5, p6, trampoline| {
-            let path_string = unsafe { PCWSTR::from_raw(path).to_string().unwrap() };
-            debug!("asset" = path_string);
-
-            if let Some((mapped_path, mapped_override)) =
-                wwise::find_override(&mapping, &path_string)
-            {
-                info!("override" = mapped_path);
-
-                // Force lookup to wwise's ordinary read (from disk) mode instead of the EBL read.
-                unsafe {
-                    trampoline(
-                        p1,
-                        mapped_override.as_ptr(),
-                        AkOpenMode::Read as _,
-                        p4,
-                        p5,
-                        p6,
-                    )
-                }
-            } else {
-                unsafe { trampoline(p1, path, open_mode, p4, p5, p6) }
-            }
-        })
-        .install()?;
-
-    info!("applied asset override hook");
-
-    Ok(())
+    device_manager: OnceLock<DeviceManagerResult>,
 }
 
-#[instrument(name = "dlc", skip_all)]
-fn try_hook_dlc(image_base: *const u8) -> Result<(), eyre::Error> {
-    let mount_dlc_ebl = unsafe { mount_dlc_ebl(image_base)? };
+unsafe impl Send for AttachContext {}
 
-    ModHost::get_attached_mut()
-        .hook(mount_dlc_ebl)
-        .with_closure(move |p1, p2, p3, p4, trampoline| {
-            if let Ok(device_manager) = locate_device_manager(image_base) {
-                let mut device_manager = DlDeviceManager::lock(device_manager);
-
-                let snap = device_manager.snapshot();
-
-                unsafe {
-                    trampoline(p1, p2, p3, p4);
-                }
-
-                match snap {
-                    Ok(snap) => {
-                        let new = device_manager.extract_new(snap);
-
-                        if !new.is_empty() {
-                            debug!("extracted_mounts" = ?new);
-
-                            let mut vfs = VFS.lock().unwrap();
-
-                            vfs.append(new);
-                        }
-                    }
-                    Err(e) => error!("BND4 snapshot error: {e}"),
-                }
-
-                return;
-            }
-
-            unsafe {
-                trampoline(p1, p2, p3, p4);
-            }
-        })
-        .install()?;
-
-    info!("applied asset override hook");
-
-    Ok(())
-}
-
-fn image_base() -> *const u8 {
-    unsafe { GetModuleHandleW(PCWSTR::null()) }
-        .expect("GetModuleHandleW failed")
-        .0 as *const u8
-}
-
-fn locate_device_manager(
-    image_base: *const u8,
-) -> Result<NonNull<DlDeviceManager>, dl_device::FindError> {
-    struct DeviceManager(Result<NonNull<DlDeviceManager>, dl_device::FindError>);
-
-    static DEVICE_MANAGER: OnceLock<DeviceManager> = OnceLock::new();
-
-    unsafe impl Send for DeviceManager {}
-    unsafe impl Sync for DeviceManager {}
-
-    DEVICE_MANAGER
-        .get_or_init(|| unsafe { DeviceManager(dl_device::find_device_manager(image_base)) })
-        .0
-        .clone()
-}
+unsafe impl Sync for AttachContext {}
