@@ -1,12 +1,13 @@
 use std::{
-    ffi::OsString,
+    ffi::{c_void, OsString},
     mem,
     os::windows::ffi::OsStringExt,
     ptr::NonNull,
+    slice,
     sync::{Arc, Mutex, OnceLock},
 };
 
-use eyre::eyre;
+use eyre::{eyre, OptionExt};
 use me3_mod_host_assets::{
     dl_device::{self, DlDeviceManager, DlFileOperator, VfsMounts},
     dlc::mount_dlc_ebl,
@@ -18,7 +19,21 @@ use me3_mod_host_assets::{
 };
 use me3_mod_protocol::Game;
 use tracing::{debug, error, info, info_span, instrument, warn};
-use windows::{core::PCWSTR, Win32::System::LibraryLoader::GetModuleHandleW};
+use windows::{
+    core::{s, w, PCWSTR, PWSTR},
+    Wdk::{
+        Foundation::{NTSTRSAFE_UNICODE_STRING_MAX_CCH, OBJECT_ATTRIBUTES},
+        Storage::FileSystem::{NTCREATEFILE_CREATE_DISPOSITION, NTCREATEFILE_CREATE_OPTIONS},
+    },
+    Win32::{
+        Foundation::{HANDLE, NTSTATUS, UNICODE_STRING},
+        Storage::FileSystem::{FILE_ACCESS_RIGHTS, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE},
+        System::{
+            LibraryLoader::{GetModuleHandleW, GetProcAddress},
+            IO::IO_STATUS_BLOCK,
+        },
+    },
+};
 
 use crate::host::ModHost;
 
@@ -31,6 +46,8 @@ pub fn attach_override(
 ) -> Result<(), eyre::Error> {
     let image_base = image_base();
 
+    hook_nt_create_file(mapping.clone())?;
+
     hook_file_init(image_base, mapping.clone())?;
 
     if let Err(e) = try_hook_wwise(image_base, mapping.clone()) {
@@ -40,6 +57,92 @@ pub fn attach_override(
     if let Err(e) = try_hook_dlc(image_base) {
         debug!("error" = &*e, "skipping DLC hook");
     }
+
+    Ok(())
+}
+
+#[instrument(name = "nt_create_file", skip_all)]
+fn hook_nt_create_file(mapping: Arc<ArchiveOverrideMapping>) -> Result<(), eyre::Error> {
+    type NtCreateFile = unsafe extern "C" fn(
+        *mut HANDLE,
+        FILE_ACCESS_RIGHTS,
+        *const OBJECT_ATTRIBUTES,
+        *mut IO_STATUS_BLOCK,
+        *const i64,
+        FILE_FLAGS_AND_ATTRIBUTES,
+        FILE_SHARE_MODE,
+        NTCREATEFILE_CREATE_DISPOSITION,
+        NTCREATEFILE_CREATE_OPTIONS,
+        *const c_void,
+        u32,
+    ) -> NTSTATUS;
+
+    let nt_create_file = unsafe {
+        let ntdll = GetModuleHandleW(w!("ntdll"))?;
+        let nt_create_file =
+            GetProcAddress(ntdll, s!("NtCreateFile")).ok_or_eyre("NtCreateFile not found")?;
+        mem::transmute::<_, NtCreateFile>(nt_create_file)
+    };
+
+    let hook_span = info_span!("hook");
+
+    ModHost::get_attached_mut()
+        .hook(nt_create_file)
+        .with_closure(
+            move |p1, p2, mut p3, p4, p5, p6, p7, p8, p9, p10, p11, trampoline| unsafe {
+                let _hook_guard = hook_span.enter();
+
+                let object_attributes = p3.as_ref().unwrap();
+                let object_name = object_attributes.ObjectName.as_ref().unwrap();
+
+                // UNICODE_STRING::Length is in bytes, not wide characters.
+                let file_name = OsString::from_wide(slice::from_raw_parts(
+                    object_name.Buffer.as_ptr(),
+                    (object_name.Length / 2) as usize,
+                ))
+                .to_string_lossy()
+                .into_owned();
+
+                let file_name = file_name.strip_prefix("\\??\\").unwrap_or(&file_name);
+
+                if let Some((mapped_path, mapped_override)) = mapping.disk_override(file_name) {
+                    if mapped_override.len() <= NTSTRSAFE_UNICODE_STRING_MAX_CCH as usize {
+                        info!("override" = mapped_path);
+
+                        let override_name_len = (mapped_override.len() * 2) as u16;
+
+                        let object_name = UNICODE_STRING {
+                            Length: override_name_len,
+                            MaximumLength: override_name_len,
+                            Buffer: PWSTR::from_raw(mapped_override.as_ptr() as *mut u16),
+                        };
+
+                        let object_attributes = OBJECT_ATTRIBUTES {
+                            ObjectName: &object_name,
+                            ..*object_attributes
+                        };
+
+                        p3 = &object_attributes;
+                    } else {
+                        let truncated_override_path = mapped_path
+                            .chars()
+                            .take(255)
+                            .chain("...".chars())
+                            .collect::<String>();
+
+                        warn!(
+                            "override" = truncated_override_path,
+                            "override path exceeds 32767 characters"
+                        );
+                    }
+                }
+
+                trampoline(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11)
+            },
+        )
+        .install()?;
+
+    info!("applied asset override hook");
 
     Ok(())
 }
@@ -139,7 +242,7 @@ fn hook_ebl_utility(
             let expanded = unsafe { device_manager.expand_path(path_cstr.as_wide()) };
 
             if mapping
-                .get_override(OsString::from_wide(&expanded))
+                .vfs_override(OsString::from_wide(&expanded))
                 .is_some()
             {
                 return None;
@@ -175,7 +278,7 @@ fn hook_device_manager(
             let expanded = DlDeviceManager::lock(device_manager).expand_path(path.as_bytes());
 
             let (mapped_path, mapped_override) =
-                mapping.get_override(OsString::from_wide(&expanded))?;
+                mapping.vfs_override(OsString::from_wide(&expanded))?;
 
             info!("override" = mapped_path);
 
@@ -241,7 +344,7 @@ fn hook_set_path(
 
         let expanded = DlDeviceManager::lock(device_manager).expand_path(path.as_bytes());
 
-        let (_, mapped_override) = mapping.get_override(OsString::from_wide(&expanded))?;
+        let (_, mapped_override) = mapping.vfs_override(OsString::from_wide(&expanded))?;
 
         let mut path = path.clone();
         path.replace(mapped_override);

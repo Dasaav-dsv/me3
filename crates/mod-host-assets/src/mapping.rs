@@ -105,16 +105,16 @@ impl ArchiveOverrideMapping {
         Ok(())
     }
 
-    pub fn get_override<S: AsRef<OsStr>>(&self, path_str: S) -> Option<(&str, &[u16])> {
-        let from_map = |k: &Path| self.map.get(k).map(|(p, w)| (&**p, &**w));
+    pub fn vfs_override<S: AsRef<OsStr>>(&self, path_str: S) -> Option<(&str, &[u16])> {
+        self.map
+            .get(Path::new(split_virtual_root(&path_str)))
+            .map(|(p, w)| (&**p, &**w))
+    }
 
-        if let Ok(norm) = Path::new(&path_str).normalize() {
-            if let Ok(key) = norm.as_path().strip_prefix(&self.current_dir) {
-                return from_map(key);
-            }
-        }
-
-        from_map(Path::new(split_virtual_root(&path_str)))
+    pub fn disk_override<S: AsRef<OsStr>>(&self, path_str: S) -> Option<(&str, &[u16])> {
+        let normalized = Path::new(&path_str).normalize().ok()?;
+        let key = normalized.as_path().strip_prefix(&self.current_dir).ok()?;
+        self.map.get(key).map(|(p, w)| (&**p, &**w))
     }
 }
 
@@ -211,19 +211,19 @@ mod test {
 
         assert!(
             asset_mapping
-                .get_override("data0:/regulation.bin")
+                .vfs_override("data0:/regulation.bin")
                 .is_some(),
             "override for regulation.bin was not found"
         );
         assert!(
             asset_mapping
-                .get_override("data0:/event/common.emevd.dcx")
+                .vfs_override("data0:/event/common.emevd.dcx")
                 .is_some(),
             "override for event/common.emevd.dcx not found"
         );
         assert!(
             asset_mapping
-                .get_override("data0:/common.emevd.dcx")
+                .vfs_override("data0:/common.emevd.dcx")
                 .is_none(),
             "event/common.emevd.dcx was found incorrectly under the regulation root"
         );
