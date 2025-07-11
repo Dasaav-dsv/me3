@@ -1,14 +1,12 @@
 use std::{
-    cell::RefCell,
-    ffi::{c_void, OsString},
+    ffi::OsString,
     mem,
     os::windows::ffi::OsStringExt,
     ptr::NonNull,
-    slice,
     sync::{Arc, Mutex, OnceLock},
 };
 
-use eyre::{eyre, OptionExt};
+use eyre::eyre;
 use me3_mod_host_assets::{
     dl_device::{self, DlDeviceManager, DlFileOperator, VfsMounts},
     dlc::mount_dlc_ebl,
@@ -20,21 +18,7 @@ use me3_mod_host_assets::{
 };
 use me3_mod_protocol::Game;
 use tracing::{debug, error, info, info_span, instrument, warn};
-use windows::{
-    core::{s, w, PCWSTR, PWSTR},
-    Wdk::{
-        Foundation::{NTSTRSAFE_UNICODE_STRING_MAX_CCH, OBJECT_ATTRIBUTES},
-        Storage::FileSystem::{NTCREATEFILE_CREATE_DISPOSITION, NTCREATEFILE_CREATE_OPTIONS},
-    },
-    Win32::{
-        Foundation::{HANDLE, NTSTATUS, UNICODE_STRING},
-        Storage::FileSystem::{FILE_ACCESS_RIGHTS, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE},
-        System::{
-            LibraryLoader::{GetModuleHandleW, GetProcAddress},
-            IO::IO_STATUS_BLOCK,
-        },
-    },
-};
+use windows::{core::PCWSTR, Win32::System::LibraryLoader::GetModuleHandleW};
 
 use crate::host::ModHost;
 
@@ -47,8 +31,6 @@ pub fn attach_override(
 ) -> Result<(), eyre::Error> {
     let image_base = image_base();
 
-    hook_nt_create_file(mapping.clone())?;
-
     hook_file_init(image_base, mapping.clone())?;
 
     if let Err(e) = try_hook_wwise(image_base, mapping.clone()) {
@@ -58,97 +40,6 @@ pub fn attach_override(
     if let Err(e) = try_hook_dlc(image_base) {
         debug!("error" = &*e, "skipping DLC hook");
     }
-
-    Ok(())
-}
-
-#[instrument(name = "nt_create_file", skip_all)]
-fn hook_nt_create_file(mapping: Arc<ArchiveOverrideMapping>) -> Result<(), eyre::Error> {
-    type NtCreateFile = unsafe extern "C" fn(
-        *mut HANDLE,
-        FILE_ACCESS_RIGHTS,
-        *const OBJECT_ATTRIBUTES,
-        *mut IO_STATUS_BLOCK,
-        *const i64,
-        FILE_FLAGS_AND_ATTRIBUTES,
-        FILE_SHARE_MODE,
-        NTCREATEFILE_CREATE_DISPOSITION,
-        NTCREATEFILE_CREATE_OPTIONS,
-        *const c_void,
-        u32,
-    ) -> NTSTATUS;
-
-    let nt_create_file = unsafe {
-        let ntdll = GetModuleHandleW(w!("ntdll"))?;
-        let nt_create_file =
-            GetProcAddress(ntdll, s!("NtCreateFile")).ok_or_eyre("NtCreateFile not found")?;
-        mem::transmute::<_, NtCreateFile>(nt_create_file)
-    };
-
-    let hook_span = info_span!("hook");
-
-    ModHost::get_attached_mut()
-        .hook(nt_create_file)
-        .with_closure(
-            move |p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, trampoline| unsafe {
-                const NT_OBJECT_PREFIX: [u16; 4] = [b'\\' as _, b'?' as _, b'?' as _, b'\\' as _];
-                const NT_OBJECT_MAX_LEN: usize = NTSTRSAFE_UNICODE_STRING_MAX_CCH as usize - NT_OBJECT_PREFIX.len();
-
-                // This thread local serves multiple purposes:
-                // 1. Reusing a buffer (up to NTSTRSAFE_UNICODE_STRING_MAX_CCH), which is freed when a thread exits.
-                // 2. Keeping track of recursive re-entry into the NtCreateFile hook via the RefCell borrow check.
-                thread_local! { static CACHED_PATH: RefCell<Vec<u16>> = RefCell::new(NT_OBJECT_PREFIX.to_vec()); }
-
-                let mut object_attributes = *p3.as_ref().unwrap();
-                let mut object_name = *object_attributes.ObjectName.as_ref().unwrap();
-                object_attributes.ObjectName = &object_name;
-
-                CACHED_PATH.with(|cell| {
-                    match cell.try_borrow_mut() {
-                        Ok(mut cached_path) => {
-                            let _hook_guard = hook_span.enter();
-
-                            // UNICODE_STRING::Length is in bytes, not wide characters.
-                            let file_name = slice::from_raw_parts(
-                                object_name.Buffer.as_ptr(),
-                                (object_name.Length / 2) as usize,
-                            );
-
-                            let mapped_override = file_name
-                                .strip_prefix(&NT_OBJECT_PREFIX)
-                                .and_then(|f| mapping.disk_override(OsString::from_wide(f)));
-
-                            if let Some((mapped_path, mapped_override)) = mapped_override {
-                                if mapped_override.len() <= NT_OBJECT_MAX_LEN {
-                                    info!("override" = mapped_path);
-
-                                    cached_path.truncate(NT_OBJECT_PREFIX.len());
-                                    cached_path.extend_from_slice(mapped_override);
-
-                                    let override_name_len = (cached_path.len() * 2) as u16;
-
-                                    object_name = UNICODE_STRING {
-                                        Length: override_name_len,
-                                        MaximumLength: override_name_len,
-                                        Buffer: PWSTR::from_raw(cached_path.as_mut_ptr()),
-                                    };
-                                } else {
-                                    warn!("an override's path is too long!");
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            warn!("BUG: NtCreateFile hook was entered recursively");
-                        }
-                    }
-                });
-
-                trampoline(p1, p2, &object_attributes, p4, p5, p6, p7, p8, p9, p10, p11)
-            },
-        )
-        .install()?;
-
-    info!("applied asset override hook");
 
     Ok(())
 }

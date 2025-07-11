@@ -32,13 +32,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 windows = { workspace = true, features = [
-    "Wdk_Foundation",
-    "Wdk_Storage_FileSystem",
-    "Wdk_System_Threading",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
-    "Win32_System_IO",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
