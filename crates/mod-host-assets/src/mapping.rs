@@ -144,10 +144,7 @@ impl VfsKey {
         let normalized = path
             .as_ref()
             .components()
-            .skip_while(|c| match c.as_os_str().as_encoded_bytes().last() {
-                Some(b':') => true,
-                _ => false,
-            })
+            .skip_while(|c| matches!(c.as_os_str().as_encoded_bytes().last(), Some(b':')))
             .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
             .collect();
 
