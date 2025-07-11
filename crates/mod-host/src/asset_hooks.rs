@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     ffi::{c_void, OsString},
     mem,
     os::windows::ffi::OsStringExt,
@@ -89,55 +90,60 @@ fn hook_nt_create_file(mapping: Arc<ArchiveOverrideMapping>) -> Result<(), eyre:
     ModHost::get_attached_mut()
         .hook(nt_create_file)
         .with_closure(
-            move |p1, p2, mut p3, p4, p5, p6, p7, p8, p9, p10, p11, trampoline| unsafe {
-                let _hook_guard = hook_span.enter();
+            move |p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, trampoline| unsafe {
+                const NT_OBJECT_PREFIX: [u16; 4] = [b'\\' as _, b'?' as _, b'?' as _, b'\\' as _];
+                const NT_OBJECT_MAX_LEN: usize = NTSTRSAFE_UNICODE_STRING_MAX_CCH as usize - NT_OBJECT_PREFIX.len();
 
-                let object_attributes = p3.as_ref().unwrap();
-                let object_name = object_attributes.ObjectName.as_ref().unwrap();
+                // This thread local serves multiple purposes:
+                // 1. Reusing a buffer (up to NTSTRSAFE_UNICODE_STRING_MAX_CCH), which is freed when a thread exits.
+                // 2. Keeping track of recursive re-entry into the NtCreateFile hook via the RefCell borrow check.
+                thread_local! { static CACHED_PATH: RefCell<Vec<u16>> = RefCell::new(NT_OBJECT_PREFIX.to_vec()); }
 
-                // UNICODE_STRING::Length is in bytes, not wide characters.
-                let file_name = OsString::from_wide(slice::from_raw_parts(
-                    object_name.Buffer.as_ptr(),
-                    (object_name.Length / 2) as usize,
-                ))
-                .to_string_lossy()
-                .into_owned();
+                let mut object_attributes = *p3.as_ref().unwrap();
+                let mut object_name = *object_attributes.ObjectName.as_ref().unwrap();
+                object_attributes.ObjectName = &object_name;
 
-                let file_name = file_name.strip_prefix("\\??\\").unwrap_or(&file_name);
+                CACHED_PATH.with(|cell| {
+                    match cell.try_borrow_mut() {
+                        Ok(mut cached_path) => {
+                            let _hook_guard = hook_span.enter();
 
-                if let Some((mapped_path, mapped_override)) = mapping.disk_override(file_name) {
-                    if mapped_override.len() <= NTSTRSAFE_UNICODE_STRING_MAX_CCH as usize {
-                        info!("override" = mapped_path);
+                            // UNICODE_STRING::Length is in bytes, not wide characters.
+                            let file_name = slice::from_raw_parts(
+                                object_name.Buffer.as_ptr(),
+                                (object_name.Length / 2) as usize,
+                            );
 
-                        let override_name_len = (mapped_override.len() * 2) as u16;
+                            let mapped_override = file_name
+                                .strip_prefix(&NT_OBJECT_PREFIX)
+                                .and_then(|f| mapping.disk_override(OsString::from_wide(f)));
 
-                        let object_name = UNICODE_STRING {
-                            Length: override_name_len,
-                            MaximumLength: override_name_len,
-                            Buffer: PWSTR::from_raw(mapped_override.as_ptr() as *mut u16),
-                        };
+                            if let Some((mapped_path, mapped_override)) = mapped_override {
+                                if mapped_override.len() <= NT_OBJECT_MAX_LEN {
+                                    info!("override" = mapped_path);
 
-                        let object_attributes = OBJECT_ATTRIBUTES {
-                            ObjectName: &object_name,
-                            ..*object_attributes
-                        };
+                                    cached_path.truncate(NT_OBJECT_PREFIX.len());
+                                    cached_path.extend_from_slice(mapped_override);
 
-                        p3 = &object_attributes;
-                    } else {
-                        let truncated_override_path = mapped_path
-                            .chars()
-                            .take(255)
-                            .chain("...".chars())
-                            .collect::<String>();
+                                    let override_name_len = (cached_path.len() * 2) as u16;
 
-                        warn!(
-                            "override" = truncated_override_path,
-                            "override path exceeds 32767 characters"
-                        );
+                                    object_name = UNICODE_STRING {
+                                        Length: override_name_len,
+                                        MaximumLength: override_name_len,
+                                        Buffer: PWSTR::from_raw(cached_path.as_mut_ptr()),
+                                    };
+                                } else {
+                                    warn!("an override's path is too long!");
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            warn!("BUG: NtCreateFile hook was entered recursively");
+                        }
                     }
-                }
+                });
 
-                trampoline(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11)
+                trampoline(p1, p2, &object_attributes, p4, p5, p6, p7, p8, p9, p10, p11)
             },
         )
         .install()?;
