@@ -1,11 +1,16 @@
-use std::{fs::DirEntry, path::Path};
+use std::{
+    ffi::OsStr,
+    fs::DirEntry,
+    path::{Path, PathBuf},
+};
 
-use color_eyre::eyre::{Context as _, OptionExt as _};
+use color_eyre::eyre::Context;
 use me3_mod_protocol::{
-    dependency::sort_dependencies,
+    item::{AsItem, Item},
     native::Native,
-    package::{Package, WithPackageSource},
-    Game, ModProfile,
+    package::Package,
+    profile::{ModProfile, ProfileMergeError},
+    Game,
 };
 use normpath::PathExt;
 use tracing::warn;
@@ -26,7 +31,7 @@ impl ProfileDb {
 
 pub struct Profile {
     name: String,
-    base_dir: Box<Path>,
+    path: PathBuf,
     profile: ModProfile,
 }
 
@@ -35,7 +40,7 @@ impl Profile {
     pub fn transient() -> Self {
         Self {
             name: "transient-profile".to_string(),
-            base_dir: Box::from(Path::new(".")),
+            path: Default::default(),
             profile: Default::default(),
         }
     }
@@ -46,34 +51,34 @@ impl Profile {
     }
 
     /// Get the directory containing this profile file.
-    pub fn base_dir(&self) -> &Path {
-        &self.base_dir
+    pub fn base_dir(&self) -> Option<&Path> {
+        self.path.parent()
+    }
+
+    /// Returns the path to the profile file.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Get the single game this profile supports, or None if it supports multiple games/omits
     /// support metadata.
     pub fn supported_game(&self) -> Option<Game> {
-        let supports = self.profile.supports();
-
-        if supports.len() == 1 {
-            Some(supports[0].game)
-        } else {
-            None
-        }
+        self.profile.game()
     }
 
-    /// Get an unordered list of natives to be loaded by this profile.
-    ///
-    /// See [compile] to produce an ordered list.
+    /// Returns a list of natives to be loaded by this profile.
     pub fn natives(&self) -> impl Iterator<Item = Native> {
         self.profile.natives().into_iter()
     }
 
-    /// Get an unordered list of packages loaded by this profile.
-    ///
-    /// See [compile] to produce an ordered list.
+    /// Returns a list of packages loaded by this profile.
     pub fn packages(&self) -> impl Iterator<Item = Package> {
         self.profile.packages().into_iter()
+    }
+
+    /// Returns a list of profiles loaded by this profile.
+    pub fn profiles(&self) -> impl Iterator<Item = Item> {
+        self.profile.profiles().into_iter()
     }
 
     /// Get the savefile name that may be overridden by this profile.
@@ -89,35 +94,51 @@ impl Profile {
         }
     }
 
-    /// Compile this profile into a load order of native DLLs and packages to be loaded.
-    pub fn compile(&self) -> color_eyre::Result<(Vec<Native>, Vec<Package>)> {
-        fn exists<S: WithPackageSource>(p: &S) -> bool {
-            match p.source().try_exists() {
-                Ok(true) => true,
-                _ => {
-                    warn!(path = %p.source().display(), "specified path does not exist or is inaccessible");
-                    false
-                }
-            }
-        }
+    /// Attempt to apply the properties of another profile on top of this profile.
+    ///
+    /// Returns a profile that is a combination of both.
+    pub fn try_merge<P: AsRef<ModProfile>>(&self, other: &P) -> Result<Self, ProfileMergeError> {
+        Ok(Self {
+            name: self.name.clone(),
+            path: self.path.clone(),
+            profile: self.profile.try_merge(other.as_ref())?,
+        })
+    }
 
-        fn canonicalize<S: WithPackageSource>(base_dir: &Path, sources: &mut Vec<S>) {
+    /// Compile this profile into a load order of native DLLs, packages and files to be loaded.
+    pub fn compile(&self) -> color_eyre::Result<(Vec<Native>, Vec<Package>)> {
+        fn canonicalize<S: AsItem>(base_dir: &Path, sources: &mut Vec<S>) {
             sources
                 .iter_mut()
-                .for_each(|pkg| pkg.source_mut().make_absolute(base_dir));
-            sources.retain(exists);
+                .for_each(|i| i.item_mut().make_absolute(base_dir));
+
+            sources.retain(|s| match s.item().as_ref().try_exists() {
+                Ok(true) => s.item().enabled,
+                _ => {
+                    warn!(
+                        "path" = ?s.item().as_ref(),
+                        "specified path does not exist or is inaccessible"
+                    );
+                    false
+                }
+            });
         }
 
         let mut packages = self.profile.packages();
         let mut natives = self.profile.natives();
 
-        canonicalize(&self.base_dir, &mut packages);
-        canonicalize(&self.base_dir, &mut natives);
+        let base_dir = self.base_dir().unwrap_or(Path::new("."));
 
-        let ordered_natives = sort_dependencies(natives)?;
-        let ordered_packages = sort_dependencies(packages)?;
+        canonicalize(base_dir, &mut packages);
+        canonicalize(base_dir, &mut natives);
 
-        Ok((ordered_natives, ordered_packages))
+        Ok((natives, packages))
+    }
+}
+
+impl AsRef<ModProfile> for Profile {
+    fn as_ref(&self) -> &ModProfile {
+        &self.profile
     }
 }
 
@@ -134,7 +155,7 @@ pub enum ProfileDbError {
 }
 
 impl ProfileDb {
-    pub fn load(&self, path: impl AsRef<Path>) -> color_eyre::Result<Profile> {
+    pub fn load<P: AsRef<Path>>(&self, path: P) -> color_eyre::Result<Profile> {
         let path = path.as_ref();
         let is_file_ref = path.is_absolute() && path.exists();
         let canonical_path = is_file_ref
@@ -144,9 +165,19 @@ impl ProfileDb {
                     .iter()
                     .filter_map(|dir| {
                         let mut candidate = dir.join(path);
-                        let _ = candidate.set_extension("me3");
+                        let extension = candidate.extension();
 
-                        candidate.exists().then_some(candidate.into_boxed_path())
+                        if extension.is_none()
+                            || (extension != Some(OsStr::new(".me3")) && !candidate.is_file())
+                        {
+                            candidate.as_mut_os_string().push(".me3");
+
+                            if !candidate.exists() {
+                                return None;
+                            }
+                        }
+
+                        Some(candidate.into_boxed_path())
                     })
                     .next_back()
             })
@@ -160,20 +191,17 @@ impl ProfileDb {
             })
             .wrap_err("failed while normalizing")?;
 
-        let parent = normalized_path
-            .parent()?
-            .map(|base| base.as_path())
-            .ok_or_eyre("parent folder of mod profile is inaccessible")?;
-
-        let profile = ModProfile::from_file(&canonical_path)?;
         let name = canonical_path
             .file_stem()
-            .expect("BUG: profile path must have a filename")
-            .to_string_lossy();
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let profile = ModProfile::from_file(&canonical_path)?;
 
         Ok(Profile {
-            name: name.to_string(),
-            base_dir: Box::from(parent),
+            name,
+            path: normalized_path.into_path_buf(),
             profile,
         })
     }
@@ -234,7 +262,7 @@ mod test {
         let profile = db.load(temp_file.path())?;
 
         assert_eq!("my-profile", profile.name());
-        assert_eq!(temp_file.parent().unwrap(), profile.base_dir());
+        assert_eq!(temp_file.parent(), profile.base_dir());
 
         Ok(())
     }

@@ -2,13 +2,8 @@ use std::{fs, path::PathBuf};
 
 use clap::{ArgAction, Args, Subcommand};
 use color_eyre::eyre::{eyre, OptionExt};
-use me3_mod_protocol::{
-    dependency::Dependency,
-    native::Native,
-    package::{Package, WithPackageSource},
-    ModProfile, Supports,
-};
-use tracing::{error, warn};
+use me3_mod_protocol::profile::{builder::ModProfileBuilder, ModProfile};
+use tracing::{error, info, warn};
 
 use crate::{config::Config, db::DbContext, output::OutputBuilder, Game};
 
@@ -22,18 +17,27 @@ pub enum ProfileCommands {
     #[clap(disable_help_flag = true)]
     List,
 
-    /// Show information on a profile.
-    #[clap(name = "show")]
-    Show {
-        /// Name of the profile.
-        name: String,
-    },
+    /// Show information about a profile.
+    Show(ProfileNameArgs),
+
+    /// Upgrade a profile to the latest profile version.
+    Upgrade(ProfileNameArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ProfileNameArgs {
+    /// Name of the profile or its path (use with --file).
+    name: String,
+
+    /// Optional flag to treat the input as a filename instead of a profile name.
+    #[clap(short, long, action = ArgAction::SetTrue)]
+    file: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct ProfileCreateArgs {
-    /// Name of the profile.
-    name: String,
+    #[clap(flatten)]
+    name: ProfileNameArgs,
 
     /// Game to associate with this profile for one-click launches.
     #[clap(
@@ -45,13 +49,19 @@ pub struct ProfileCreateArgs {
     #[arg(value_enum)]
     game: Option<Game>,
 
-    /// Path to package directory (asset override mod) [repeatable option]
+    /// Path to a native DLL, package, file or profile [repeatable option]
+    #[clap(short('u'), long("use"))]
+    uses: Vec<PathBuf>,
+
+    /// (DEPRECATED, use "-u") Path to package directory (asset override mod) [repeatable option]
+    #[deprecated]
+    #[clap(long("native"))]
+    natives: Vec<PathBuf>,
+
+    /// (DEPRECATED, use "-u") Path to DLL file (native DLL mod) [repeatable option]
+    #[deprecated]
     #[clap(long("package"))]
     packages: Vec<PathBuf>,
-
-    /// Path to DLL file (native DLL mod) [repeatable option]
-    #[clap(short('n'), long("native"))]
-    natives: Vec<PathBuf>,
 
     /// Name of an alternative savefile to use (in the default savefile directory).
     #[clap(long("savefile"))]
@@ -59,10 +69,6 @@ pub struct ProfileCreateArgs {
 
     #[clap(flatten)]
     options: ProfileOptions,
-
-    /// Treat NAME as a file path, instead of creating the profile in the profile dir.
-    #[clap(short, long, action = ArgAction::SetTrue)]
-    file: bool,
 
     /// Overwrite the profile if it already exists.
     #[clap(long, action = ArgAction::SetTrue)]
@@ -101,6 +107,16 @@ impl ProfileOptions {
     }
 }
 
+impl ProfileNameArgs {
+    fn into_profile_path(self, config: &Config) -> color_eyre::Result<PathBuf> {
+        if self.file {
+            Ok(PathBuf::from(self.name))
+        } else {
+            config.resolve_profile(&self.name)
+        }
+    }
+}
+
 #[tracing::instrument(skip_all)]
 pub fn list(db: DbContext) -> color_eyre::Result<()> {
     for profile_entry in db.profiles.list() {
@@ -115,13 +131,9 @@ pub fn list(db: DbContext) -> color_eyre::Result<()> {
     Ok(())
 }
 
-#[tracing::instrument(skip(config))]
+#[tracing::instrument(skip_all)]
 pub fn create(config: Config, args: ProfileCreateArgs) -> color_eyre::Result<()> {
-    let profile_path = if args.file {
-        PathBuf::from(args.name)
-    } else {
-        config.resolve_profile(&args.name)?
-    };
+    let profile_path = args.name.into_profile_path(&config)?;
 
     if std::fs::exists(&profile_path).is_ok_and(|exists| exists) && !args.overwrite {
         error!("profile already exists, use --overwrite to ignore this error");
@@ -133,53 +145,49 @@ pub fn create(config: Config, args: ProfileCreateArgs) -> color_eyre::Result<()>
         .ok_or_eyre("profile parent path was removed")?;
     fs::create_dir_all(profile_dir)?;
 
-    let mut profile = ModProfile::default();
-
-    if let Some(game) = args.game {
-        let supports = profile.supports_mut();
-
-        supports.push(Supports {
-            game: game.into(),
-            since_version: None,
-        });
+    #[allow(deprecated)]
+    if !args.natives.is_empty() {
+        warn!("option \"--native\" is deprecated, use \"--use\" instead!");
     }
 
-    let packages = profile.packages_mut();
-    for pkg in args.packages {
-        let full_path = if pkg.is_absolute() || std::fs::exists(&pkg)? {
-            pkg
-        } else {
-            profile_dir.join(pkg)
-        };
-
-        if !std::fs::exists(&full_path)? {
-            std::fs::create_dir_all(&full_path)?;
-        }
-
-        packages.push(Package::new(full_path));
+    #[allow(deprecated)]
+    if !args.packages.is_empty() {
+        warn!("option \"--package\" is deprecated, use \"--use\" instead!");
     }
 
-    let natives = profile.natives_mut();
-    for pkg in args.natives {
-        natives.push(Native::new(pkg));
-    }
-
-    let start_online = profile.start_online_mut();
-    *start_online = args.options.start_online;
-
-    let contents = toml::to_string_pretty(&profile)?;
-
-    std::fs::write(profile_path, contents)?;
+    #[allow(deprecated)]
+    ModProfileBuilder::new()
+        .with_supported_game(args.game.map(Into::into))
+        .with_paths(args.uses)
+        .with_paths(args.natives)
+        .with_paths(args.packages)
+        .with_savefile(args.savefile)
+        .start_online(args.options.start_online)
+        .disable_arxan(args.options.disable_arxan)
+        .write(profile_path)?;
 
     Ok(())
 }
 
-pub fn show(db: DbContext, name: String) -> color_eyre::Result<()> {
-    let profile = db.profiles.load(name)?;
+pub fn show(db: DbContext, config: Config, args: ProfileNameArgs) -> color_eyre::Result<()> {
+    let profile_path = args.into_profile_path(&config)?;
+
+    let profile = db.profiles.load(profile_path)?;
     let mut output = OutputBuilder::new("Mod Profile");
 
     output.property("Name", profile.name());
-    output.property("Path", profile.base_dir().to_string_lossy());
+
+    output.property(
+        "Path",
+        match profile.base_dir() {
+            Some(dir) => dir.to_string_lossy(),
+            None => std::borrow::Cow::Borrowed("-"),
+        },
+    );
+
+    if let Some(savefile) = profile.savefile() {
+        output.property("Save", savefile);
+    }
 
     output.section("Supports", |builder| {
         if let Some(game) = profile.supported_game() {
@@ -189,10 +197,9 @@ pub fn show(db: DbContext, name: String) -> color_eyre::Result<()> {
 
     output.section("Natives", |builder| {
         for native in profile.natives() {
-            builder.section(native.id(), |builder| {
+            builder.section(&native.name, |builder| {
                 builder.indent(2);
-
-                builder.property("Path", native.source().to_string_lossy());
+                builder.property("Path", native.path.to_string_lossy());
                 builder.property("Optional", native.optional.to_string());
                 builder.property("Enabled", native.enabled);
             });
@@ -201,17 +208,25 @@ pub fn show(db: DbContext, name: String) -> color_eyre::Result<()> {
 
     output.section("Packages", |builder| {
         for package in profile.packages() {
-            builder.section(package.id(), |builder| {
+            builder.section(&package.name, |builder| {
                 builder.indent(2);
-                builder.property("Path", package.source().to_string_lossy());
+                builder.property("Path", package.path.to_string_lossy());
+                builder.property("Optional", package.optional.to_string());
                 builder.property("Enabled", package.enabled);
             });
         }
     });
 
-    if let Some(savefile) = profile.savefile() {
-        output.property("Savefile", savefile);
-    }
+    output.section("Profiles", |builder| {
+        for profile in profile.profiles() {
+            builder.section(&profile.name, |builder| {
+                builder.indent(2);
+                builder.property("Path", profile.path.to_string_lossy());
+                builder.property("Optional", profile.optional.to_string());
+                builder.property("Enabled", profile.enabled);
+            });
+        }
+    });
 
     output.section("Options", |builder| {
         let opt_to_str =
@@ -223,6 +238,38 @@ pub fn show(db: DbContext, name: String) -> color_eyre::Result<()> {
     });
 
     println!("{}", output.build());
+
+    Ok(())
+}
+
+pub fn upgrade(db: DbContext, config: Config, args: ProfileNameArgs) -> color_eyre::Result<()> {
+    let profile = args
+        .into_profile_path(&config)
+        .and_then(|path| db.profiles.load(path))?;
+
+    if matches!(profile.as_ref(), ModProfile::V2(_)) {
+        info!("Profile is already using the latest profile version.");
+        return Ok(());
+    }
+
+    let profile_path = profile.path();
+
+    let mut backup_path = profile_path.to_owned();
+    backup_path.as_mut_os_string().push(".bak");
+
+    fs::copy(profile.path(), &backup_path)?;
+
+    ModProfileBuilder::new()
+        .with_supported_game(profile.supported_game())
+        .with_dependencies(profile.natives())
+        .with_dependencies(profile.packages())
+        .with_dependencies(profile.profiles())
+        .with_savefile(profile.savefile())
+        .start_online(profile.options().start_online)
+        .disable_arxan(profile.options().disable_arxan)
+        .write(profile_path)?;
+
+    info!("Successfully upgraded {profile_path:?} (wrote backup to {backup_path:?}).");
 
     Ok(())
 }
