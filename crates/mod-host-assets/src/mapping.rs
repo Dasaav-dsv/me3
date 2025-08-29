@@ -1,5 +1,6 @@
 use std::{
     borrow::Borrow,
+    cell::LazyCell,
     collections::{HashMap, VecDeque},
     env,
     ffi::OsStr,
@@ -10,7 +11,7 @@ use std::{
     path::{Path, PathBuf, StripPrefixError},
 };
 
-use me3_mod_protocol::package::AssetOverrideSource;
+use me3_mod_protocol::package::Package;
 use normpath::PathExt;
 use thiserror::Error;
 use tracing::error;
@@ -28,6 +29,7 @@ pub struct VfsOverride {
     display: Box<str>,
     path_c_str: Box<Path>,
     wide_c_str: Box<[u16]>,
+    source: Option<&'static str>,
 }
 
 #[derive(Debug, Error)]
@@ -55,27 +57,27 @@ impl VfsOverrideMapping {
         })
     }
 
-    /// Scans a set of directories, mapping discovered assets into itself.
-    pub fn scan_directories<I, S>(&mut self, sources: I) -> Result<(), VfsOverrideMappingError>
+    /// Sequentially scans a set of packages, mapping discovered assets into itself.
+    pub fn map_packages<'a, I>(&mut self, packages: I) -> Result<(), VfsOverrideMappingError>
     where
-        I: Iterator<Item = S>,
-        S: AssetOverrideSource,
+        I: Iterator<Item = &'a Package>,
     {
-        sources
-            .map(|p| self.scan_directory(p.asset_path()))
+        packages
+            .map(|p| self.map_package_sources(p))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(())
     }
 
-    /// Traverses a folder structure, mapping discovered assets into itself.
-    pub fn scan_directory<P: AsRef<Path>>(
+    /// Traverses a package's folder structure, mapping discovered assets into itself.
+    pub fn map_package_sources(
         &mut self,
-        base_directory: P,
+        package: &Package,
     ) -> Result<(), VfsOverrideMappingError> {
-        let base_directory = base_directory
-            .as_ref()
-            .to_path_buf()
+        let package_source = LazyCell::new(|| package.name.clone().leak() as &'static str);
+
+        let base_directory = package
+            .path
             .normalize()
             .map_err(VfsOverrideMappingError::ReadDir)?
             .into_path_buf();
@@ -106,7 +108,8 @@ impl VfsOverrideMapping {
                     continue;
                 };
 
-                let archive_override = VfsOverride::new(dir_entry);
+                let archive_override =
+                    VfsOverride::new_with_package_source(dir_entry, Some(&package_source));
 
                 self.map.insert(vfs_key, archive_override);
             }
@@ -147,6 +150,10 @@ impl VfsOverrideMapping {
 
 impl VfsOverride {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
+        Self::new_with_package_source(path, None)
+    }
+
+    pub fn new_with_package_source<P: AsRef<Path>>(path: P, source: Option<&'static str>) -> Self {
         let display = path.as_ref().display().to_string().into_boxed_str();
 
         let (wide_c_str, path_c_str) = {
@@ -163,7 +170,12 @@ impl VfsOverride {
             display,
             path_c_str,
             wide_c_str,
+            source,
         }
+    }
+
+    pub fn source(&self) -> Option<&str> {
+        self.source
     }
 
     pub fn as_str_lossy(&self) -> &str {
@@ -299,6 +311,8 @@ impl Borrow<Path> for VfsKey {
 mod test {
     use std::path::Path;
 
+    use me3_mod_protocol::package::Package;
+
     use super::{VfsKey, VfsOverrideMapping};
 
     #[test]
@@ -346,7 +360,9 @@ mod test {
         let mut asset_mapping = VfsOverrideMapping::new().unwrap();
 
         let test_mod_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/test-mod");
-        asset_mapping.scan_directory(test_mod_dir).unwrap();
+        asset_mapping
+            .map_package_sources(&Package::new(test_mod_dir))
+            .unwrap();
 
         assert!(
             asset_mapping

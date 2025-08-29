@@ -14,105 +14,46 @@
       "required": [
         "profileVersion"
       ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "profileVersion": {
+          "type": "string",
+          "const": "v2"
+        }
+      },
+      "$ref": "#/$defs/ModProfileV2",
+      "required": [
+        "profileVersion"
+      ]
     }
   ],
   "$defs": {
-    "Dependent": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "optional": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "id",
-        "optional"
-      ]
-    },
-    "Game": {
-      "description": "List of games supported by me3",
-      "type": "string",
-      "oneOf": [
-        {
-          "title": "Dark Souls III",
-          "description": "Dark Souls III (Steam App ID: 374320)",
-          "enum": [
-            "darksouls3",
-            "ds3"
-          ]
-        },
-        {
-          "title": "Sekiro: Shadows Die Twice",
-          "description": "Sekiro: Shadows Die Twice (Steam App ID: 814380)",
-          "enum": [
-            "sekiro",
-            "sdt"
-          ]
-        },
-        {
-          "title": "Elden Ring",
-          "description": "Elden Ring (Steam App ID: 1245620)",
-          "enum": [
-            "eldenring",
-            "er",
-            "elden-ring"
-          ]
-        },
-        {
-          "title": "Armored Core VI: Fires of Rubicon",
-          "description": "Armored Core VI: Fires of Rubicon (Steam App ID: 1888160)",
-          "enum": [
-            "armoredcore6",
-            "ac6"
-          ]
-        },
-        {
-          "title": "Elden Ring Nightreign",
-          "description": "Elden Ring Nightreign (Steam App ID: 2622380)",
-          "enum": [
-            "nightreign",
-            "nr",
-            "nightrein"
-          ]
-        }
-      ]
-    },
-    "ModFile": {
-      "description": "A filesystem path to the contents of a package. May be relative to the [ModProfile] containing\nit.",
-      "type": "string"
-    },
     "ModProfileV1": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ModProfileV1Layout",
       "type": "object",
       "properties": {
-        "disable_arxan": {
-          "description": "Try to neutralize Arxan GuardIT code protection to improve mod stability.",
-          "type": [
-            "boolean",
-            "null"
-          ],
-          "default": null
+        "supports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Supports"
+          }
         },
         "natives": {
-          "description": "Native modules (DLLs) that will be loaded.",
           "type": "array",
-          "default": [],
           "items": {
-            "$ref": "#/$defs/Native"
+            "$ref": "#/$defs/NativeV1"
           }
         },
         "packages": {
-          "description": "A collection of packages containing assets that should be considered for loading\nbefore the DVDBND.",
           "type": "array",
-          "default": [],
           "items": {
-            "$ref": "#/$defs/Package"
+            "$ref": "#/$defs/PackageV1"
           }
         },
         "savefile": {
-          "description": "Name of an alternative savefile to use (in the default savefile directory).",
           "type": [
             "string",
             "null"
@@ -120,172 +61,402 @@
           "default": null
         },
         "start_online": {
-          "description": "Starts the game with multiplayer server connectivity enabled.",
           "type": [
             "boolean",
             "null"
           ],
           "default": null
         },
-        "supports": {
-          "description": "The games that this profile supports.",
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/Supports"
-          }
-        }
-      }
-    },
-    "Native": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "description": "Should this native be loaded?",
-          "type": "boolean",
-          "default": true
-        },
-        "finalizer": {
-          "description": "An optional symbol to be called when this native successfully is queued for unload.",
+        "disable_arxan": {
           "type": [
-            "string",
+            "boolean",
             "null"
-          ]
-        },
-        "initializer": {
-          "description": "An optional symbol to be called after this native successfully loads.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NativeInitializerCondition"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "load_after": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/Dependent"
-          }
-        },
-        "load_before": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/Dependent"
-          }
-        },
-        "optional": {
-          "description": "If this native fails to load and this value is false, treat it as a critical error.",
-          "type": "boolean",
-          "default": false
-        },
-        "path": {
-          "description": "Path to the DLL. Can be relative to the mod profile.",
-          "$ref": "#/$defs/ModFile"
+          ],
+          "default": null
         }
       },
-      "required": [
-        "path"
-      ]
-    },
-    "NativeInitializerCondition": {
-      "oneOf": [
-        {
+      "$defs": {
+        "Supports": {
           "type": "object",
           "properties": {
-            "delay": {
-              "type": "object",
-              "properties": {
-                "ms": {
-                  "type": "integer",
-                  "format": "uint",
-                  "minimum": 0
-                }
-              },
-              "required": [
-                "ms"
+            "game": {
+              "$ref": "#/$defs/Game"
+            },
+            "since": {
+              "type": [
+                "string",
+                "null"
               ]
             }
           },
-          "additionalProperties": false,
           "required": [
-            "delay"
+            "game"
           ]
         },
-        {
+        "Game": {
+          "description": "List of games supported by me3",
+          "type": "string",
+          "oneOf": [
+            {
+              "title": "Dark Souls III",
+              "description": "Dark Souls III (Steam App ID: 374320)",
+              "enum": [
+                "darksouls3",
+                "ds3"
+              ]
+            },
+            {
+              "title": "Sekiro: Shadows Die Twice",
+              "description": "Sekiro: Shadows Die Twice (Steam App ID: 814380)",
+              "enum": [
+                "sekiro",
+                "sdt"
+              ]
+            },
+            {
+              "title": "Elden Ring",
+              "description": "Elden Ring (Steam App ID: 1245620)",
+              "enum": [
+                "eldenring",
+                "er",
+                "elden-ring"
+              ]
+            },
+            {
+              "title": "Armored Core VI: Fires of Rubicon",
+              "description": "Armored Core VI: Fires of Rubicon (Steam App ID: 1888160)",
+              "enum": [
+                "armoredcore6",
+                "ac6"
+              ]
+            },
+            {
+              "title": "Elden Ring Nightreign",
+              "description": "Elden Ring Nightreign (Steam App ID: 2622380)",
+              "enum": [
+                "nightreign",
+                "nr",
+                "nightrein"
+              ]
+            }
+          ]
+        },
+        "NativeV1": {
           "type": "object",
           "properties": {
-            "function": {
-              "type": "string"
+            "path": {
+              "$ref": "#/$defs/ModFile"
+            },
+            "optional": {
+              "type": "boolean",
+              "default": false
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "load_before": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DependentV1"
+              }
+            },
+            "load_after": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DependentV1"
+              }
+            },
+            "initializer": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NativeInitializerConditionV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "finalizer": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
-          "additionalProperties": false,
           "required": [
-            "function"
-          ]
-        }
-      ]
-    },
-    "Package": {
-      "description": "A package is a source for files that override files within the existing games DVDBND archives.\nIt points to a local path containing assets matching the hierarchy they would be served under in\nthe DVDBND.",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "description": "Enable this package?",
-          "type": "boolean",
-          "default": true
-        },
-        "id": {
-          "description": "The unique identifier for this package.",
-          "type": [
-            "string",
-            "null"
+            "path"
           ]
         },
-        "load_after": {
-          "description": "A list of package IDs that this package should load after.",
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/Dependent"
-          }
+        "ModFile": {
+          "type": "string"
         },
-        "load_before": {
-          "description": "A list of packages that this package should load before.",
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/Dependent"
-          }
+        "DependentV1": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "optional": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "optional"
+          ]
         },
-        "path": {
-          "description": "A path to the source of this package.",
-          "$ref": "#/$defs/ModFile"
+        "NativeInitializerConditionV1": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "delay": {
+                  "type": "object",
+                  "properties": {
+                    "ms": {
+                      "type": "integer",
+                      "format": "uint",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "ms"
+                  ]
+                }
+              },
+              "required": [
+                "delay"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "function": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "function"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "PackageV1": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "path": {
+              "$ref": "#/$defs/ModFile"
+            },
+            "load_after": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DependentV1"
+              }
+            },
+            "load_before": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DependentV1"
+              }
+            }
+          },
+          "required": [
+            "path"
+          ]
         }
-      },
-      "required": [
-        "path"
-      ]
+      }
     },
-    "Supports": {
+    "ModProfileV2": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ModProfileV2Layout",
       "type": "object",
       "properties": {
         "game": {
-          "$ref": "#/$defs/Game"
+          "$ref": "#/$defs/ProfileGame",
+          "default": {
+            "launch": null,
+            "savefile": null,
+            "start_online": null,
+            "disable_arxan": null
+          }
         },
-        "since": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "dependencies": {
+          "$ref": "#/$defs/KeyValueMap(ProfileDependency)"
         }
       },
       "required": [
-        "game"
-      ]
+        "dependencies"
+      ],
+      "$defs": {
+        "ProfileGame": {
+          "type": "object",
+          "properties": {
+            "launch": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Game"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "savefile": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "start_online": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "default": null
+            },
+            "disable_arxan": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "default": null
+            }
+          }
+        },
+        "Game": {
+          "description": "List of games supported by me3",
+          "type": "string",
+          "oneOf": [
+            {
+              "title": "Dark Souls III",
+              "description": "Dark Souls III (Steam App ID: 374320)",
+              "enum": [
+                "darksouls3",
+                "ds3"
+              ]
+            },
+            {
+              "title": "Sekiro: Shadows Die Twice",
+              "description": "Sekiro: Shadows Die Twice (Steam App ID: 814380)",
+              "enum": [
+                "sekiro",
+                "sdt"
+              ]
+            },
+            {
+              "title": "Elden Ring",
+              "description": "Elden Ring (Steam App ID: 1245620)",
+              "enum": [
+                "eldenring",
+                "er",
+                "elden-ring"
+              ]
+            },
+            {
+              "title": "Armored Core VI: Fires of Rubicon",
+              "description": "Armored Core VI: Fires of Rubicon (Steam App ID: 1888160)",
+              "enum": [
+                "armoredcore6",
+                "ac6"
+              ]
+            },
+            {
+              "title": "Elden Ring Nightreign",
+              "description": "Elden Ring Nightreign (Steam App ID: 2622380)",
+              "enum": [
+                "nightreign",
+                "nr",
+                "nightrein"
+              ]
+            }
+          ]
+        },
+        "KeyValueMap(ProfileDependency)": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "initializer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/NativeInitializerCondition"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "path": {
+                "description": "A path to the source of this item.",
+                "type": "string"
+              },
+              "enabled": {
+                "description": "Does this item participate in dependency resolution?",
+                "type": "boolean"
+              },
+              "optional": {
+                "description": "Should failing to find this item result in a hard error?",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        "NativeInitializerCondition": {
+          "type": "object",
+          "properties": {
+            "delay": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NativeInitializerDelay"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "function": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          }
+        },
+        "NativeInitializerDelay": {
+          "type": "object",
+          "properties": {
+            "ms": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "ms"
+          ]
+        }
+      }
     }
   }
 }

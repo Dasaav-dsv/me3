@@ -17,15 +17,15 @@ use clap::{
     builder::{BoolValueParser, MapValueParser, TypedValueParser},
     ArgAction, Args,
 };
-use color_eyre::eyre::{eyre, OptionExt};
+use color_eyre::eyre::{eyre, Context, OptionExt};
 use me3_env::{LauncherVars, TelemetryVars};
 use me3_launcher_attach_protocol::AttachConfig;
-use me3_mod_protocol::{native::Native, package::Package};
+use me3_mod_protocol::profile::builder::ModProfileBuilder;
 use normpath::PathExt;
 use serde::{Deserialize, Serialize};
 use steamlocate::{CompatTool, Library, SteamDir};
 use tempfile::NamedTempFile;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{
     commands::profile::ProfileOptions,
@@ -122,7 +122,7 @@ pub struct LaunchArgs {
 
     /// Path to a ModProfile configuration file (TOML or JSON) or name of a profile
     /// stored in the me3 profile folder ($XDG_CONFIG_HOME/me3).
-    #[arg(
+    #[clap(
             short('p'),
             long("profile"),
             help_heading = "Mod configuration",
@@ -130,8 +130,19 @@ pub struct LaunchArgs {
         )]
     profile: Option<String>,
 
-    /// Path to package directories that the mod host will use as VFS mount points.
-    #[arg(
+    /// A list of native DLLs, package, file and profile paths to use.
+    #[clap(
+            short('u'),
+            long("use"),
+            action = clap::ArgAction::Append,
+            help_heading = "Mod configuration",
+            value_hint = clap::ValueHint::FilePath,
+        )]
+    uses: Vec<PathBuf>,
+
+    /// (DEPRECATED, use "-u") Path to package directories that the mod host will use as VFS mount points.
+    #[deprecated]
+    #[clap(
             long("package"),
             action = clap::ArgAction::Append,
             help_heading = "Mod configuration",
@@ -139,8 +150,9 @@ pub struct LaunchArgs {
         )]
     packages: Vec<PathBuf>,
 
-    /// Path to DLLs to be loaded by the mod host.
-    #[arg(
+    /// (DEPRECATED, use "-u") Path to DLLs to be loaded by the mod host.
+    #[deprecated]
+    #[clap(
             short('n'),
             long("native"),
             action = clap::ArgAction::Append,
@@ -150,7 +162,7 @@ pub struct LaunchArgs {
     natives: Vec<PathBuf>,
 
     /// Name of an alternative savefile to use (in the default savefile directory).
-    #[arg(long("savefile"), help_heading = "Mod configuration")]
+    #[clap(long("savefile"), help_heading = "Mod configuration")]
     savefile: Option<String>,
 }
 
@@ -260,23 +272,50 @@ impl LaunchArgs {
             Profile::transient()
         };
 
-        let target_selector = self.target_selector.as_ref().unwrap_or(&Selector {
-            auto_detect: true,
-            game: None,
-            steam_id: None,
-        });
+        #[allow(deprecated)]
+        if !self.natives.is_empty() {
+            warn!("option \"--native\" is deprecated, use \"--use\" instead!");
+        }
 
-        let game = if target_selector.auto_detect {
-            profile
-                .supported_game()
-                .map(crate::Game)
-                .ok_or_eyre("unable to determine which game to launch")
-        } else {
-            target_selector
-                .game
-                .or_else(|| target_selector.steam_id.and_then(Game::from_app_id))
-                .ok_or_eyre("unable to determine game from name or app ID")
-        }?;
+        #[allow(deprecated)]
+        if !self.packages.is_empty() {
+            warn!("option \"--package\" is deprecated, use \"--use\" instead!");
+        }
+
+        let game_from_args = self
+            .target_selector
+            .as_ref()
+            .and_then(|s| s.game.or_else(|| s.steam_id.and_then(Game::from_app_id)))
+            .map(Into::into);
+
+        #[allow(deprecated)]
+        let uses_args = self.uses.iter().chain(&self.natives).chain(&self.packages);
+
+        for path in uses_args.clone() {
+            if !path.exists() {
+                return Err(eyre!("{path:?} does not exist"));
+            }
+        }
+
+        let profile_from_args = ModProfileBuilder::new()
+            .with_supported_game(game_from_args)
+            .with_paths(uses_args.cloned())
+            .with_savefile(self.savefile.clone())
+            .start_online(self.profile_options.start_online)
+            .disable_arxan(self.profile_options.disable_arxan)
+            .build();
+
+        let profile = profile.try_merge(&profile_from_args).wrap_err_with(|| {
+            eyre!(
+                "game ({game_from_args:?}) is not supported by profile ({:?})",
+                profile.supported_game()
+            )
+        })?;
+
+        let game = profile
+            .supported_game()
+            .map(Game)
+            .ok_or_eyre("unable to determine which game to launch")?;
 
         let game_options = config
             .options
@@ -315,33 +354,9 @@ impl LaunchArgs {
         profile_options: &ProfileOptions,
         cache_path: Option<Box<Path>>,
     ) -> color_eyre::Result<AttachConfig> {
-        for path in self.natives.iter().chain(&self.packages) {
-            if !path.exists() {
-                return Err(eyre!("{path:?} does not exist"));
-            }
-        }
+        let (natives, packages) = profile.compile()?;
 
-        let mut packages = self
-            .packages
-            .iter()
-            .filter_map(|path| path.normalize().ok())
-            .map(|normalized| Package::new(normalized.into_path_buf()))
-            .collect::<Vec<_>>();
-
-        let mut natives = self
-            .natives
-            .iter()
-            .filter_map(|path| path.normalize().ok())
-            .map(|normalized| Native::new(normalized.into_path_buf()))
-            .collect::<Vec<_>>();
-
-        let (ordered_natives, ordered_packages) = profile.compile()?;
-
-        packages.extend(ordered_packages);
-        natives.extend(ordered_natives);
-
-        let savefile = self.savefile.clone().or_else(|| profile.savefile());
-
+        let savefile = profile.savefile();
         if let Some(savefile) = &savefile {
             // https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions
             let is_windows_path_reserved_char = |c: char| {
@@ -360,8 +375,8 @@ impl LaunchArgs {
 
         Ok(AttachConfig {
             game: game.into(),
-            packages,
             natives,
+            packages,
             savefile,
             cache_path: cache_path.map(|path| path.into_path_buf()),
             suspend: self.suspend,
@@ -374,7 +389,7 @@ impl LaunchArgs {
     }
 }
 
-#[tracing::instrument(err, skip_all)]
+// #[tracing::instrument(err, skip_all)]
 pub fn launch(db: DbContext, config: Config, args: LaunchArgs) -> color_eyre::Result<()> {
     let LaunchContext {
         game,
@@ -434,7 +449,7 @@ pub fn launch(db: DbContext, config: Config, args: LaunchArgs) -> color_eyre::Re
     std::fs::create_dir_all(&attach_config_dir)?;
     let attach_config_file = NamedTempFile::new_in(&attach_config_dir)?;
 
-    std::fs::write(&attach_config_file, toml::to_string_pretty(&attach_config)?)?;
+    std::fs::write(&attach_config_file, toml::to_string(&attach_config)?)?;
     info!(?attach_config_file, ?attach_config, "wrote attach config");
 
     let now = Local::now();
