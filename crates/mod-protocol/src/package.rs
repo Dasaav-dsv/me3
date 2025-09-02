@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::item::{AsItem, Item};
@@ -11,7 +10,7 @@ use crate::item::{AsItem, Item};
 /// A package is a source for files that override files within the existing games DVDBND archives.
 /// It points to a local path containing assets matching the hierarchy they would be served under in
 /// the DVDBND.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Package(pub(crate) Item);
 
 impl Package {

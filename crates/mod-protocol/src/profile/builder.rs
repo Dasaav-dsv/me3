@@ -15,7 +15,7 @@ use crate::{
 #[derive(Default)]
 pub struct ModProfileBuilder {
     supports: Option<Game>,
-    dependencies: Vec<ProfileDependency>,
+    dependencies: Vec<(String, ProfileDependency)>,
     savefile: Option<String>,
     start_online: Option<bool>,
     disable_arxan: Option<bool>,
@@ -74,7 +74,7 @@ impl ModProfileBuilder {
     #[inline]
     pub fn with_dependencies<I>(&mut self, iter: I) -> &mut Self
     where
-        I: IntoIterator<Item: Into<ProfileDependency>>,
+        I: IntoIterator<Item: Into<(String, ProfileDependency)>>,
     {
         self.dependencies.extend(iter.into_iter().map(Into::into));
         self

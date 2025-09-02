@@ -21,9 +21,9 @@ pub struct NativeInitializerCondition {
     pub function: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Native {
-    #[serde(default, flatten)]
+    #[serde(flatten)]
     pub(crate) inner: Item,
 
     /// An optional symbol to be called after this native successfully loads.
@@ -34,6 +34,11 @@ impl Native {
     #[inline]
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         Item::new(path).into()
+    }
+
+    #[inline]
+    pub fn is_default(&self) -> bool {
+        self.inner.is_default() && self.initializer.is_none()
     }
 }
 

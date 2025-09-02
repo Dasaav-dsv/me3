@@ -117,7 +117,7 @@ impl ProfileNameArgs {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(err, skip_all)]
 pub fn list(db: DbContext) -> color_eyre::Result<()> {
     for profile_entry in db.profiles.list() {
         let profile_name = profile_entry
@@ -131,7 +131,7 @@ pub fn list(db: DbContext) -> color_eyre::Result<()> {
     Ok(())
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(err, skip_all)]
 pub fn create(config: Config, args: ProfileCreateArgs) -> color_eyre::Result<()> {
     let profile_path = args.name.into_profile_path(&config)?;
 
@@ -169,6 +169,7 @@ pub fn create(config: Config, args: ProfileCreateArgs) -> color_eyre::Result<()>
     Ok(())
 }
 
+#[tracing::instrument(err, skip_all)]
 pub fn show(db: DbContext, config: Config, args: ProfileNameArgs) -> color_eyre::Result<()> {
     let profile_path = args.into_profile_path(&config)?;
 
@@ -242,6 +243,7 @@ pub fn show(db: DbContext, config: Config, args: ProfileNameArgs) -> color_eyre:
     Ok(())
 }
 
+#[tracing::instrument(err, skip_all)]
 pub fn upgrade(db: DbContext, config: Config, args: ProfileNameArgs) -> color_eyre::Result<()> {
     let profile = args
         .into_profile_path(&config)

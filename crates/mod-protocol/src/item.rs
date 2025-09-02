@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub trait AsItem {
@@ -11,28 +10,18 @@ pub trait AsItem {
     fn item_mut(&mut self) -> &mut Item;
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Item {
     /// Name associated with this item.
-    #[serde(rename = "$key$")]
     pub name: String,
 
     /// A path to the source of this item.
-    #[serde(alias = "source")]
     pub path: PathBuf,
 
     /// Does this item participate in dependency resolution?
-    #[serde(
-        default = "Item::enabled_default",
-        skip_serializing_if = "Item::enabled_skip_if_default"
-    )]
     pub enabled: bool,
 
     /// Should failing to find this item result in a hard error?
-    #[serde(
-        default = "Item::optional_default",
-        skip_serializing_if = "Item::optional_skip_if_default"
-    )]
     pub optional: bool,
 }
 
@@ -48,28 +37,27 @@ impl Item {
     }
 
     #[inline]
+    pub fn is_default(&self) -> bool {
+        self.enabled && !self.optional
+    }
+
+    #[inline]
     pub fn make_absolute<P: AsRef<Path>>(&mut self, base: P) {
         if self.path.is_relative() {
             self.path = base.as_ref().join(&self.path);
         }
     }
+}
 
+impl Default for Item {
     #[inline]
-    fn enabled_default() -> bool {
-        true
-    }
-
-    fn enabled_skip_if_default(enabled: &bool) -> bool {
-        *enabled == Self::enabled_default()
-    }
-
-    #[inline]
-    fn optional_default() -> bool {
-        false
-    }
-
-    fn optional_skip_if_default(optional: &bool) -> bool {
-        *optional == Self::optional_default()
+    fn default() -> Self {
+        Self {
+            name: Default::default(),
+            path: Default::default(),
+            enabled: true,
+            optional: false,
+        }
     }
 }
 
@@ -91,7 +79,7 @@ impl From<PathBuf> for Item {
 
         Self {
             name: format!(
-                "{}-{:x}",
+                "{}_{:x}",
                 path.file_stem()
                     .unwrap_or_default()
                     .to_string_lossy()
@@ -99,8 +87,7 @@ impl From<PathBuf> for Item {
                 fnv1_a(path.as_os_str().as_encoded_bytes())
             ),
             path,
-            enabled: Self::enabled_default(),
-            optional: Self::optional_default(),
+            ..Default::default()
         }
     }
 }

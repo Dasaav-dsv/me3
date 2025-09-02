@@ -411,7 +411,7 @@ impl LaunchArgs {
     }
 }
 
-// #[tracing::instrument(err, skip_all)]
+#[tracing::instrument(err, skip_all)]
 pub fn launch(db: DbContext, config: Config, args: LaunchArgs) -> color_eyre::Result<()> {
     let LaunchContext {
         game,

@@ -294,7 +294,10 @@
           }
         },
         "dependencies": {
-          "$ref": "#/$defs/KeyValueMap(ProfileDependency)"
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ProfileDependency"
+          }
         }
       },
       "required": [
@@ -386,39 +389,40 @@
             }
           ]
         },
-        "KeyValueMap(ProfileDependency)": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "object",
-            "properties": {
-              "initializer": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/NativeInitializerCondition"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null
-              },
-              "path": {
-                "description": "A path to the source of this item.",
-                "type": "string"
-              },
-              "enabled": {
-                "description": "Does this item participate in dependency resolution?",
-                "type": "boolean"
-              },
-              "optional": {
-                "description": "Should failing to find this item result in a hard error?",
-                "type": "boolean"
-              }
+        "ProfileDependency": {
+          "anyOf": [
+            {
+              "type": "string"
             },
-            "required": [
-              "path"
-            ]
-          }
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "optional": {
+                  "type": "boolean"
+                },
+                "initializer": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/NativeInitializerCondition"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          ]
         },
         "NativeInitializerCondition": {
           "type": "object",

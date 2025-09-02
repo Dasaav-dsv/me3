@@ -1,6 +1,8 @@
+use std::path::PathBuf;
+
+use indexmap::IndexMap;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, KeyValueMap};
 
 use crate::{
     item::Item,
@@ -35,37 +37,38 @@ pub struct ModProfileV2 {
 }
 
 impl ModProfileV2 {
-    pub(super) fn push_dependency(&mut self, uses: ProfileDependency) {
-        let name = uses
-            .inner
-            .path
+    pub(super) fn push_dependency(&mut self, (name, dependency): (String, ProfileDependency)) {
+        let file_path = match &dependency {
+            ProfileDependency::Simple(path) => path,
+            ProfileDependency::Full { path, .. } => path,
+        };
+
+        let file_name = file_path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_ascii_lowercase();
 
-        if name.ends_with(".dll") {
-            self.natives.push(uses.into());
-        } else if name.ends_with(".me3")
-            || name.ends_with(".me3.toml")
-            || name.ends_with(".me3.json")
+        if file_name.ends_with(".dll") {
+            self.natives.push((name, dependency).into());
+        } else if file_name.ends_with(".me3")
+            || file_name.ends_with(".me3.toml")
+            || file_name.ends_with(".me3.json")
         {
-            self.profiles.push(uses.into());
+            self.profiles.push((name, dependency).into());
         } else {
-            self.packages.push(uses.into());
+            self.packages.push((name, dependency).into());
         }
     }
 }
 
-#[serde_as]
 #[derive(Default, Deserialize, Serialize, JsonSchema)]
 struct ModProfileV2Layout {
     #[serde(default)]
     game: ProfileGame,
 
-    #[serde_as(as = "KeyValueMap<_>")]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    dependencies: Vec<ProfileDependency>,
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    dependencies: IndexMap<String, ProfileDependency>,
 }
 
 #[derive(Default, Deserialize, Serialize, JsonSchema)]
@@ -84,12 +87,83 @@ struct ProfileGame {
 }
 
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ProfileDependency {
-    #[serde(flatten)]
-    inner: Item,
+#[serde(untagged)]
+pub enum ProfileDependency {
+    Simple(PathBuf),
+    Full {
+        path: PathBuf,
 
-    #[serde(default)]
-    initializer: Option<NativeInitializerCondition>,
+        #[serde(
+            default = "ProfileDependency::enabled_default",
+            skip_serializing_if = "ProfileDependency::enabled_is_default"
+        )]
+        enabled: bool,
+
+        #[serde(
+            default = "ProfileDependency::optional_default",
+            skip_serializing_if = "ProfileDependency::optional_is_default"
+        )]
+        optional: bool,
+
+        #[serde(default)]
+        initializer: Option<NativeInitializerCondition>,
+    },
+}
+
+impl ProfileDependency {
+    fn into_parts(self) -> (PathBuf, bool, bool, Option<NativeInitializerCondition>) {
+        match self {
+            Self::Simple(path) => (
+                path,
+                Self::enabled_default(),
+                Self::optional_default(),
+                None,
+            ),
+            Self::Full {
+                path,
+                enabled,
+                optional,
+                initializer,
+            } => (path, enabled, optional, initializer),
+        }
+    }
+
+    fn from_parts(
+        path: PathBuf,
+        enabled: bool,
+        optional: bool,
+        initializer: Option<NativeInitializerCondition>,
+    ) -> Self {
+        if enabled == Self::enabled_default()
+            && optional == Self::optional_default()
+            && initializer.is_none()
+        {
+            Self::Simple(path)
+        } else {
+            Self::Full {
+                path,
+                enabled,
+                optional,
+                initializer,
+            }
+        }
+    }
+
+    fn enabled_default() -> bool {
+        true
+    }
+
+    fn enabled_is_default(enabled: &bool) -> bool {
+        *enabled == Self::enabled_default()
+    }
+
+    fn optional_default() -> bool {
+        false
+    }
+
+    fn optional_is_default(optional: &bool) -> bool {
+        *optional == Self::optional_default()
+    }
 }
 
 impl From<ModProfileV2Layout> for ModProfileV2 {
@@ -112,7 +186,7 @@ impl From<ModProfileV2Layout> for ModProfileV2 {
 
 impl From<ModProfileV2> for ModProfileV2Layout {
     fn from(profile: ModProfileV2) -> Self {
-        let mut dependencies = vec![];
+        let mut dependencies = IndexMap::new();
 
         dependencies.extend(profile.natives.into_iter().map(Into::into));
         dependencies.extend(profile.packages.into_iter().map(Into::into));
@@ -130,48 +204,65 @@ impl From<ModProfileV2> for ModProfileV2Layout {
     }
 }
 
-impl From<ProfileDependency> for Native {
-    fn from(uses: ProfileDependency) -> Self {
+impl From<(String, ProfileDependency)> for Native {
+    fn from((name, dependency): (String, ProfileDependency)) -> Self {
+        let (path, enabled, optional, initializer) = dependency.into_parts();
         Self {
-            initializer: uses.initializer,
-            ..uses.inner.into()
+            inner: Item {
+                name,
+                path,
+                enabled,
+                optional,
+            },
+            initializer,
         }
     }
 }
 
-impl From<Native> for ProfileDependency {
+impl From<Native> for (String, ProfileDependency) {
     fn from(native: Native) -> Self {
-        Self {
-            inner: native.inner,
-            initializer: native.initializer,
-        }
+        (
+            native.inner.name,
+            ProfileDependency::from_parts(
+                native.inner.path,
+                native.inner.enabled,
+                native.inner.optional,
+                native.initializer,
+            ),
+        )
     }
 }
 
-impl From<ProfileDependency> for Package {
-    fn from(uses: ProfileDependency) -> Self {
-        uses.inner.into()
+impl From<(String, ProfileDependency)> for Package {
+    fn from(dependency: (String, ProfileDependency)) -> Self {
+        Item::from(dependency).into()
     }
 }
 
-impl From<Package> for ProfileDependency {
+impl From<Package> for (String, ProfileDependency) {
     fn from(package: Package) -> Self {
         package.0.into()
     }
 }
 
-impl From<ProfileDependency> for Item {
-    fn from(uses: ProfileDependency) -> Self {
-        uses.inner
+impl From<(String, ProfileDependency)> for Item {
+    fn from((name, dependency): (String, ProfileDependency)) -> Self {
+        let (path, enabled, optional, _) = dependency.into_parts();
+        Self {
+            name,
+            path,
+            enabled,
+            optional,
+        }
     }
 }
 
-impl From<Item> for ProfileDependency {
+impl From<Item> for (String, ProfileDependency) {
     fn from(item: Item) -> Self {
-        Self {
-            inner: item,
-            initializer: None,
-        }
+        (
+            item.name,
+            ProfileDependency::from_parts(item.path, item.enabled, item.optional, None),
+        )
     }
 }
 
