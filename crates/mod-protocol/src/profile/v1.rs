@@ -4,7 +4,7 @@ use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 
 use crate::{
-    item::Item,
+    mod_file::ModFile,
     native::{Native, NativeInitializerCondition, NativeInitializerDelay},
     package::Package,
     Game,
@@ -87,7 +87,7 @@ enum NativeInitializerConditionV1 {
 #[allow(dead_code)]
 #[derive(Deserialize, JsonSchema)]
 struct NativeV1 {
-    path: ModFile,
+    path: ModFileV1,
     #[serde(default = "off")]
     optional: bool,
     #[serde(default = "on")]
@@ -107,7 +107,7 @@ pub struct PackageV1 {
     #[serde(default = "on")]
     enabled: bool,
     #[serde(alias = "source")]
-    path: ModFile,
+    path: ModFileV1,
     #[serde(default)]
     load_after: Vec<DependentV1>,
     #[serde(default)]
@@ -115,7 +115,7 @@ pub struct PackageV1 {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct ModFile(PathBuf);
+struct ModFileV1(PathBuf);
 
 #[allow(dead_code)]
 #[derive(Deserialize, JsonSchema)]
@@ -140,7 +140,7 @@ impl From<ModProfileV1Layout> for ModProfileV1 {
 impl From<NativeV1> for Native {
     fn from(value: NativeV1) -> Self {
         Self {
-            inner: Item {
+            inner: ModFile {
                 enabled: value.enabled,
                 optional: value.optional,
                 ..value.path.0.into()
@@ -166,7 +166,7 @@ impl From<NativeV1> for Native {
 
 impl From<PackageV1> for Package {
     fn from(value: PackageV1) -> Self {
-        let mut item = Item {
+        let mut item = ModFile {
             enabled: value.enabled,
             ..value.path.0.into()
         };

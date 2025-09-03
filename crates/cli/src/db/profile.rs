@@ -6,7 +6,7 @@ use std::{
 
 use color_eyre::eyre::Context;
 use me3_mod_protocol::{
-    item::{AsItem, Item},
+    mod_file::{AsModFile, ModFile},
     native::Native,
     package::Package,
     profile::{ModProfile, ProfileMergeError},
@@ -77,7 +77,7 @@ impl Profile {
     }
 
     /// Returns a list of profiles loaded by this profile.
-    pub fn profiles(&self) -> impl Iterator<Item = Item> {
+    pub fn profiles(&self) -> impl Iterator<Item = ModFile> {
         self.profile.profiles().into_iter()
     }
 
@@ -107,16 +107,16 @@ impl Profile {
 
     /// Compile this profile into a load order of native DLLs, packages and files to be loaded.
     pub fn compile(&self) -> color_eyre::Result<(Vec<Native>, Vec<Package>)> {
-        fn canonicalize<S: AsItem>(base_dir: &Path, sources: &mut Vec<S>) {
+        fn canonicalize<S: AsModFile>(base_dir: &Path, sources: &mut Vec<S>) {
             sources
                 .iter_mut()
-                .for_each(|i| i.item_mut().make_absolute(base_dir));
+                .for_each(|i| i.as_mod_file_mut().make_absolute(base_dir));
 
-            sources.retain(|s| match s.item().as_ref().try_exists() {
-                Ok(true) => s.item().enabled,
+            sources.retain(|s| match s.as_mod_file().as_ref().try_exists() {
+                Ok(true) => s.as_mod_file().enabled,
                 _ => {
                     warn!(
-                        "path" = ?s.item().as_ref(),
+                        "path" = ?s.as_mod_file().as_ref(),
                         "specified path does not exist or is inaccessible"
                     );
                     false

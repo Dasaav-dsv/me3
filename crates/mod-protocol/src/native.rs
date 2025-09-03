@@ -6,7 +6,7 @@ use std::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::item::{AsItem, Item};
+use crate::mod_file::{AsModFile, ModFile};
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct NativeInitializerDelay {
@@ -24,7 +24,7 @@ pub struct NativeInitializerCondition {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Native {
     #[serde(flatten)]
-    pub(crate) inner: Item,
+    pub(crate) inner: ModFile,
 
     /// An optional symbol to be called after this native successfully loads.
     pub initializer: Option<NativeInitializerCondition>,
@@ -33,7 +33,7 @@ pub struct Native {
 impl Native {
     #[inline]
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
-        Item::new(path).into()
+        ModFile::new(path).into()
     }
 
     #[inline]
@@ -45,12 +45,12 @@ impl Native {
 impl AsRef<Path> for Native {
     #[inline]
     fn as_ref(&self) -> &Path {
-        self.item().as_ref()
+        self.as_mod_file().as_ref()
     }
 }
 
 impl Deref for Native {
-    type Target = Item;
+    type Target = ModFile;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -65,21 +65,21 @@ impl DerefMut for Native {
     }
 }
 
-impl AsItem for Native {
+impl AsModFile for Native {
     #[inline]
-    fn item(&self) -> &Item {
+    fn as_mod_file(&self) -> &ModFile {
         &self.inner
     }
 
     #[inline]
-    fn item_mut(&mut self) -> &mut Item {
+    fn as_mod_file_mut(&mut self) -> &mut ModFile {
         &mut self.inner
     }
 }
 
-impl From<Item> for Native {
+impl From<ModFile> for Native {
     #[inline]
-    fn from(item: Item) -> Self {
+    fn from(item: ModFile) -> Self {
         Self {
             inner: item,
             initializer: None,
@@ -90,6 +90,6 @@ impl From<Item> for Native {
 impl From<PathBuf> for Native {
     #[inline]
     fn from(path: PathBuf) -> Self {
-        Item::from(path).into()
+        ModFile::from(path).into()
     }
 }

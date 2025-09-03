@@ -5,13 +5,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub trait AsItem {
-    fn item(&self) -> &Item;
-    fn item_mut(&mut self) -> &mut Item;
+pub trait AsModFile {
+    fn as_mod_file(&self) -> &ModFile;
+    fn as_mod_file_mut(&mut self) -> &mut ModFile;
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Item {
+pub struct ModFile {
     /// Name associated with this item.
     pub name: String,
 
@@ -25,7 +25,7 @@ pub struct Item {
     pub optional: bool,
 }
 
-impl Item {
+impl ModFile {
     #[inline]
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         path.as_ref().to_owned().into()
@@ -49,7 +49,7 @@ impl Item {
     }
 }
 
-impl Default for Item {
+impl Default for ModFile {
     #[inline]
     fn default() -> Self {
         Self {
@@ -61,14 +61,14 @@ impl Default for Item {
     }
 }
 
-impl AsRef<Path> for Item {
+impl AsRef<Path> for ModFile {
     #[inline]
     fn as_ref(&self) -> &Path {
         &self.path
     }
 }
 
-impl From<PathBuf> for Item {
+impl From<PathBuf> for ModFile {
     #[inline]
     fn from(path: PathBuf) -> Self {
         let fnv1_a = |b: &[u8]| {
@@ -92,14 +92,14 @@ impl From<PathBuf> for Item {
     }
 }
 
-impl AsItem for Item {
+impl AsModFile for ModFile {
     #[inline]
-    fn item(&self) -> &Item {
+    fn as_mod_file(&self) -> &ModFile {
         self
     }
 
     #[inline]
-    fn item_mut(&mut self) -> &mut Item {
+    fn as_mod_file_mut(&mut self) -> &mut ModFile {
         self
     }
 }

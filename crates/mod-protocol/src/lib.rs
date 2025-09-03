@@ -1,5 +1,6 @@
+pub mod dependency;
 pub mod game;
-pub mod item;
+pub mod mod_file;
 pub mod native;
 pub mod package;
 pub mod profile;

@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    item::Item,
+    mod_file::ModFile,
     profile::{
         v2::{ModProfileV2, ProfileDependency},
         ModProfile,
@@ -67,7 +67,7 @@ impl ModProfileBuilder {
         I: IntoIterator<Item = PathBuf>,
     {
         self.dependencies
-            .extend(iter.into_iter().map(|i| Item::from(i).into()));
+            .extend(iter.into_iter().map(|i| ModFile::from(i).into()));
         self
     }
 

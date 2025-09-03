@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    item::Item,
+    mod_file::ModFile,
     native::Native,
     package::Package,
     profile::{
@@ -136,7 +136,7 @@ impl ModProfile {
         }
     }
 
-    pub fn profiles(&self) -> Vec<Item> {
+    pub fn profiles(&self) -> Vec<ModFile> {
         match self {
             ModProfile::V1(_) => vec![],
             ModProfile::V2(v2) => v2.profiles.clone(),

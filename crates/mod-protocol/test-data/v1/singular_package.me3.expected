@@ -4,7 +4,7 @@ V1(
         natives: [],
         packages: [
             Package(
-                Item {
+                ModFile {
                     name: "test-pkg",
                     path: ".",
                     enabled: true,

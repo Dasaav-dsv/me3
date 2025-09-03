@@ -3,7 +3,7 @@ V2(
         supports: None,
         natives: [
             Native {
-                inner: Item {
+                inner: ModFile {
                     name: "my_dll",
                     path: "./my-mod/my_dll.dll",
                     enabled: true,
@@ -14,7 +14,7 @@ V2(
         ],
         packages: [
             Package(
-                Item {
+                ModFile {
                     name: "my_mod",
                     path: "./my-mod",
                     enabled: true,
@@ -23,7 +23,7 @@ V2(
             ),
         ],
         profiles: [
-            Item {
+            ModFile {
                 name: "my_profile",
                 path: "my_profile.me3",
                 enabled: true,

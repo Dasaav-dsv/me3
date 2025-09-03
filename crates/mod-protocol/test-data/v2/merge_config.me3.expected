@@ -5,7 +5,7 @@ V2(
         ),
         natives: [
             Native {
-                inner: Item {
+                inner: ModFile {
                     name: "my_dll",
                     path: "./my-mod/my_dll.dll",
                     enabled: true,
@@ -14,7 +14,7 @@ V2(
                 initializer: None,
             },
             Native {
-                inner: Item {
+                inner: ModFile {
                     name: "test_dll",
                     path: "test.dll",
                     enabled: true,
@@ -23,7 +23,7 @@ V2(
                 initializer: None,
             },
             Native {
-                inner: Item {
+                inner: ModFile {
                     name: "other_dll",
                     path: "./other_mods/mod.dll",
                     enabled: true,
@@ -34,7 +34,7 @@ V2(
         ],
         packages: [
             Package(
-                Item {
+                ModFile {
                     name: "my_mod",
                     path: "./my-mod",
                     enabled: true,
@@ -43,13 +43,13 @@ V2(
             ),
         ],
         profiles: [
-            Item {
+            ModFile {
                 name: "my_profile",
                 path: "my_profile.me3",
                 enabled: true,
                 optional: false,
             },
-            Item {
+            ModFile {
                 name: "big_overhaul",
                 path: "./other_mods/overhaul.me3",
                 enabled: true,

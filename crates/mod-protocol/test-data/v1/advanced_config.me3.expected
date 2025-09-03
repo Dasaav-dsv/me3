@@ -8,7 +8,7 @@ V1(
         ],
         natives: [
             Native {
-                inner: Item {
+                inner: ModFile {
                     name: "my_native-ac5db8a5",
                     path: "my_native.dll",
                     enabled: true,
@@ -17,7 +17,7 @@ V1(
                 initializer: None,
             },
             Native {
-                inner: Item {
+                inner: ModFile {
                     name: "my_other_native-eae16c4a",
                     path: "./nr-mods/my_other_native.dll",
                     enabled: true,
@@ -35,7 +35,7 @@ V1(
         ],
         packages: [
             Package(
-                Item {
+                ModFile {
                     name: "my-mod",
                     path: "./mod",
                     enabled: true,
@@ -43,7 +43,7 @@ V1(
                 },
             ),
             Package(
-                Item {
+                ModFile {
                     name: "unnamed-mod-f0cb703b",
                     path: "./unnamed-mod",
                     enabled: true,
@@ -51,7 +51,7 @@ V1(
                 },
             ),
             Package(
-                Item {
+                ModFile {
                     name: "my-other-mod",
                     path: "./nr-mods/mod",
                     enabled: true,
@@ -59,7 +59,7 @@ V1(
                 },
             ),
             Package(
-                Item {
+                ModFile {
                     name: "my-disabled-mod",
                     path: "./unused-mod",
                     enabled: false,

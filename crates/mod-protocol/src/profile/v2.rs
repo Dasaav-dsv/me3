@@ -5,7 +5,7 @@ use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    item::Item,
+    mod_file::ModFile,
     native::{Native, NativeInitializerCondition},
     package::Package,
     Game,
@@ -24,7 +24,7 @@ pub struct ModProfileV2 {
     pub packages: Vec<Package>,
 
     /// Other profiles listed as dependencies by this profile.
-    pub profiles: Vec<Item>,
+    pub profiles: Vec<ModFile>,
 
     /// Name of an alternative savefile to use (in the default savefile directory).
     pub savefile: Option<String>,
@@ -208,7 +208,7 @@ impl From<(String, ProfileDependency)> for Native {
     fn from((name, dependency): (String, ProfileDependency)) -> Self {
         let (path, enabled, optional, initializer) = dependency.into_parts();
         Self {
-            inner: Item {
+            inner: ModFile {
                 name,
                 path,
                 enabled,
@@ -235,7 +235,7 @@ impl From<Native> for (String, ProfileDependency) {
 
 impl From<(String, ProfileDependency)> for Package {
     fn from(dependency: (String, ProfileDependency)) -> Self {
-        Item::from(dependency).into()
+        ModFile::from(dependency).into()
     }
 }
 
@@ -245,7 +245,7 @@ impl From<Package> for (String, ProfileDependency) {
     }
 }
 
-impl From<(String, ProfileDependency)> for Item {
+impl From<(String, ProfileDependency)> for ModFile {
     fn from((name, dependency): (String, ProfileDependency)) -> Self {
         let (path, enabled, optional, _) = dependency.into_parts();
         Self {
@@ -257,8 +257,8 @@ impl From<(String, ProfileDependency)> for Item {
     }
 }
 
-impl From<Item> for (String, ProfileDependency) {
-    fn from(item: Item) -> Self {
+impl From<ModFile> for (String, ProfileDependency) {
+    fn from(item: ModFile) -> Self {
         (
             item.name,
             ProfileDependency::from_parts(item.path, item.enabled, item.optional, None),
